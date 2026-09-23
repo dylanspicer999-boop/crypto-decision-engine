@@ -27,6 +27,23 @@ watchlist = {
     'ripple': 'XRP', 'stellar': 'Stellar'
 }
 
+# --- Cached Macro Pull ---
+@st.cache_data(ttl=43200, show_spinner=False)
+def fetch_macro_trend(coin_id):
+    try:
+        url_daily = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=100&interval=daily"
+        res_daily = requests.get(url_daily, headers=headers, timeout=10)
+        if res_daily.status_code == 200:
+            data = res_daily.json()
+            prices = [item[1] for item in data['prices']]
+            df = pd.DataFrame({'price': prices})
+            if len(df) >= 50:
+                df['SMA_50'] = df['price'].rolling(window=50).mean()
+                return bool(df['price'].iloc[-2] > df['SMA_50'].iloc[-2])
+    except Exception:
+        pass
+    return False
+
 # --- State Management for Sentinel ---
 if 'positions' not in st.session_state:
     st.session_state.positions = []
@@ -34,7 +51,7 @@ if 'positions' not in st.session_state:
 tab1, tab2 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker"])
 
 # ==========================================
-# TAB 1: RADAR SCANNER (Z-SCORE ENGINE)
+# TAB 1: RADAR SCANNER
 # ==========================================
 with tab1:
     if st.button("🔄 Run Live Market Scan", type="primary"):
@@ -45,119 +62,97 @@ with tab1:
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Calculating Z-Scores & Data for {coin_name}...")
+            status_text.text(f"Analyzing {coin_name}...")
             try:
-                url_daily = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=100&interval=daily"
-                res_daily = requests.get(url_daily, headers=headers, timeout=10)
-                time.sleep(1.5) 
+                macro_trend_bullish = fetch_macro_trend(coin_id)
                 
                 url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
                 
-                if res_daily.status_code == 200 and res_hourly.status_code == 200:
-                    
-                    # --- MACRO ENGINE ---
-                    data_daily = res_daily.json()
-                    prices_d = [item[1] for item in data_daily['prices']]
-                    df_d = pd.DataFrame({'price': prices_d})
-                    
-                    if len(df_d) < 50:
-                        continue
-                        
-                    df_d['SMA_50'] = df_d['price'].rolling(window=50).mean()
-                    macro_trend_bullish = df_d['price'].iloc[-2] > df_d['SMA_50'].iloc[-2]
-                    
-                    # --- TACTICAL ENGINE ---
+                if res_hourly.status_code == 200:
                     data_hourly = res_hourly.json()
                     prices_h = [item[1] for item in data_hourly['prices']]
                     volumes_h = [item[1] for item in data_hourly['total_volumes']]
                     
                     df_h = pd.DataFrame({'price': prices_h, 'volume': volumes_h})
                     
-                    if len(df_h) < 50:
-                        continue
+                    if len(df_h) >= 50:
+                        df_h['SMA_20'] = df_h['price'].rolling(window=20).mean()
+                        df_h['STD_20'] = df_h['price'].rolling(window=20).std()
+                        df_h['Z_Score'] = (df_h['price'] - df_h['SMA_20']) / df_h['STD_20']
                         
-                    # Fix 3: Z-Score Normalization
-                    df_h['SMA_20'] = df_h['price'].rolling(window=20).mean()
-                    df_h['STD_20'] = df_h['price'].rolling(window=20).std()
-                    df_h['Z_Score'] = (df_h['price'] - df_h['SMA_20']) / df_h['STD_20']
-                    
-                    delta = df_h['price'].diff()
-                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                    rs = gain / loss
-                    df_h['RSI_14'] = 100 - (100 / (1 + rs))
-                    
-                    df_h['Vol_SMA_20'] = df_h['volume'].rolling(window=20).mean()
-                    ema_12 = df_h['price'].ewm(span=12, adjust=False).mean()
-                    ema_26 = df_h['price'].ewm(span=26, adjust=False).mean()
-                    df_h['MACD'] = ema_12 - ema_26
-                    df_h['MACD_Signal'] = df_h['MACD'].ewm(span=9, adjust=False).mean()
-                    
-                    # Closed Candle Lock
-                    closed_p = df_h['price'].iloc[-2]
-                    closed_z = df_h['Z_Score'].iloc[-2]
-                    closed_vol = df_h['volume'].iloc[-2]
-                    closed_vol_sma = df_h['Vol_SMA_20'].iloc[-2]
-                    closed_rsi = df_h['RSI_14'].iloc[-2]
-                    closed_macd = df_h['MACD'].iloc[-2]
-                    closed_sig = df_h['MACD_Signal'].iloc[-2]
-                    
-                    # Divergence Logic
-                    past_30 = df_h.iloc[-32:-2]
-                    lowest_idx = past_30['price'].idxmin()
-                    past_low_p = past_30.loc[lowest_idx, 'price']
-                    past_low_rsi = past_30.loc[lowest_idx, 'RSI_14']
-                    
-                    is_divergence = (closed_p < past_low_p) and (closed_rsi > past_low_rsi) and (closed_z < 0)
-                    
-                    # --- NORMALIZED SCORING MATRIX ---
-                    score = 0
-                    
-                    if macro_trend_bullish: score += 25
-                    
-                    # Replaced RSI with Z-Score
-                    if is_divergence: score += 40
-                    elif closed_z <= -2.0: score += 25
-                    elif closed_z <= -1.5: score += 15
-                    elif closed_z >= 1.5: score -= 40 
-                    
-                    if closed_macd > closed_sig: score += 25
-                    if closed_vol > (closed_vol_sma * 1.2): score += 25
-                    
-                    final_score = max(0, min(100, score))
-                    
-                    # --- DYNAMIC VETOES ---
-                    if not macro_trend_bullish:
-                        verdict = "🔴 PASS (Macro Downtrend Veto)"
-                    elif closed_z >= 2.0:
-                        verdict = "🔴 PASS (Statistical Exhaustion)"
-                    elif final_score >= 80 and is_divergence:
-                        verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
-                    elif final_score >= 70:
-                        verdict = "🟢 GRADE-A BUY (Confirmed Z-Dip)"
-                    elif final_score >= 50:
-                        verdict = "🟡 WATCHLIST (Forming Setup)"
-                    else:
-                        verdict = "🔴 PASS (Weak Edge)"
-                    
-                    price_fmt = f"${closed_p:.8f}" if closed_p < 0.01 else f"${closed_p:,.2f}"
-                    
-                    results.append({
-                        "Asset": coin_name,
-                        "Price": price_fmt,
-                        "Daily Trend": "Bullish" if macro_trend_bullish else "Bearish",
-                        "Z-Score": round(closed_z, 2),
-                        "Divergence": "🔥 YES" if is_divergence else "No",
-                        "Score": f"{final_score}/100",
-                        "Verdict": verdict
-                    })
-                    
+                        delta = df_h['price'].diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                        rs = gain / loss
+                        df_h['RSI_14'] = 100 - (100 / (1 + rs))
+                        
+                        df_h['Vol_SMA_20'] = df_h['volume'].rolling(window=20).mean()
+                        ema_12 = df_h['price'].ewm(span=12, adjust=False).mean()
+                        ema_26 = df_h['price'].ewm(span=26, adjust=False).mean()
+                        df_h['MACD'] = ema_12 - ema_26
+                        df_h['MACD_Signal'] = df_h['MACD'].ewm(span=9, adjust=False).mean()
+                        
+                        closed_p = df_h['price'].iloc[-2]
+                        closed_z = df_h['Z_Score'].iloc[-2]
+                        closed_vol = df_h['volume'].iloc[-2]
+                        closed_vol_sma = df_h['Vol_SMA_20'].iloc[-2]
+                        closed_rsi = df_h['RSI_14'].iloc[-2]
+                        closed_macd = df_h['MACD'].iloc[-2]
+                        closed_sig = df_h['MACD_Signal'].iloc[-2]
+                        
+                        past_30 = df_h.iloc[-32:-2]
+                        lowest_idx = past_30['price'].idxmin()
+                        past_low_p = past_30.loc[lowest_idx, 'price']
+                        past_low_rsi = past_30.loc[lowest_idx, 'RSI_14']
+                        
+                        is_divergence = (closed_p < past_low_p) and (closed_rsi > past_low_rsi) and (closed_z < 0)
+                        
+                        score = 0
+                        if macro_trend_bullish: score += 25
+                        
+                        if is_divergence: score += 40
+                        elif closed_z <= -2.0: score += 25
+                        elif closed_z <= -1.5: score += 15
+                        elif closed_z >= 1.5: score -= 40 
+                        
+                        if closed_macd > closed_sig: score += 25
+                        if closed_vol > (closed_vol_sma * 1.2): score += 25
+                        
+                        final_score = max(0, min(100, score))
+                        
+                        # --- MANDATORY Z-SCORE VETO ADDED HERE ---
+                        if not macro_trend_bullish:
+                            verdict = "🔴 PASS (Macro Downtrend Veto)"
+                        elif closed_z >= 1.5:
+                            verdict = "🔴 PASS (Statistical Exhaustion)"
+                        elif closed_z > 0:
+                            verdict = "🔴 PASS (No Dip Detected)"
+                        elif final_score >= 80 and is_divergence:
+                            verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
+                        elif final_score >= 70:
+                            verdict = "🟢 GRADE-A BUY (Confirmed Z-Dip)"
+                        elif final_score >= 50:
+                            verdict = "🟡 WATCHLIST (Forming Setup)"
+                        else:
+                            verdict = "🔴 PASS (Weak Edge)"
+                        
+                        price_fmt = f"${closed_p:.8f}" if closed_p < 0.01 else f"${closed_p:,.2f}"
+                        
+                        results.append({
+                            "Asset": coin_name,
+                            "Price": price_fmt,
+                            "Daily Trend": "Bullish" if macro_trend_bullish else "Bearish",
+                            "Z-Score": round(closed_z, 2),
+                            "Divergence": "🔥 YES" if is_divergence else "No",
+                            "Score": f"{final_score}/100",
+                            "Verdict": verdict
+                        })
             except Exception:
                 pass
                 
             progress_bar.progress((idx + 1) / total_coins)
-            time.sleep(1.5) 
+            time.sleep(1.4)
             
         status_text.empty()
         progress_bar.empty()
@@ -198,19 +193,16 @@ with tab2:
             updated_positions = []
             for pos in st.session_state.positions:
                 coin_id = [k for k, v in watchlist.items() if v == pos["Asset"]][0]
-                
                 try:
                     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
                     res = requests.get(url, headers=headers, timeout=10)
                     if res.status_code == 200:
                         curr_price = res.json()[coin_id]['usd']
-                        
                         if curr_price > pos["High Water Mark"]:
                             pos["High Water Mark"] = curr_price
                             
                         stop_loss = pos["High Water Mark"] * (1 - pos["Stop Pct"])
                         pnl_pct = ((curr_price - pos["Entry"]) / pos["Entry"]) * 100
-                        
                         action = "🟢 HOLD" if curr_price > stop_loss else "🔴 SELL (Stop Triggered)"
                         
                         updated_positions.append({
@@ -224,7 +216,7 @@ with tab2:
                         })
                 except Exception:
                     pass
-                time.sleep(1.5)
+                time.sleep(1.2)
                 
             if updated_positions:
                 st.dataframe(pd.DataFrame(updated_positions), use_container_width=True, hide_index=True)
