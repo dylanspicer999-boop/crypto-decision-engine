@@ -6,7 +6,7 @@ import time
 # --- UI Setup ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
 st.title("🏛️ Apex Crypto Terminal")
-st.markdown("Live Institutional Dual-Timeframe Matrix & Risk Manager")
+st.markdown("Live Institutional Dual-Timeframe & Volatility Normalized Matrix")
 
 # --- Secure API Keys ---
 try:
@@ -34,7 +34,7 @@ if 'positions' not in st.session_state:
 tab1, tab2 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker"])
 
 # ==========================================
-# TAB 1: RADAR SCANNER (DUAL-TIMEFRAME)
+# TAB 1: RADAR SCANNER (Z-SCORE ENGINE)
 # ==========================================
 with tab1:
     if st.button("🔄 Run Live Market Scan", type="primary"):
@@ -45,20 +45,18 @@ with tab1:
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Fetching Multi-Timeframe Data for {coin_name}...")
+            status_text.text(f"Calculating Z-Scores & Data for {coin_name}...")
             try:
-                # 1. PULL DAILY MACRO DATA
                 url_daily = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=100&interval=daily"
                 res_daily = requests.get(url_daily, headers=headers, timeout=10)
-                time.sleep(1.5) # Rate limit protection
+                time.sleep(1.5) 
                 
-                # 2. PULL HOURLY INTRADAY DATA
                 url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
                 
                 if res_daily.status_code == 200 and res_hourly.status_code == 200:
                     
-                    # --- MACRO ENGINE (DAILY) ---
+                    # --- MACRO ENGINE ---
                     data_daily = res_daily.json()
                     prices_d = [item[1] for item in data_daily['prices']]
                     df_d = pd.DataFrame({'price': prices_d})
@@ -69,7 +67,7 @@ with tab1:
                     df_d['SMA_50'] = df_d['price'].rolling(window=50).mean()
                     macro_trend_bullish = df_d['price'].iloc[-2] > df_d['SMA_50'].iloc[-2]
                     
-                    # --- TACTICAL ENGINE (HOURLY) ---
+                    # --- TACTICAL ENGINE ---
                     data_hourly = res_hourly.json()
                     prices_h = [item[1] for item in data_hourly['prices']]
                     volumes_h = [item[1] for item in data_hourly['total_volumes']]
@@ -79,7 +77,10 @@ with tab1:
                     if len(df_h) < 50:
                         continue
                         
-                    df_h['Vol_SMA_20'] = df_h['volume'].rolling(window=20).mean()
+                    # Fix 3: Z-Score Normalization
+                    df_h['SMA_20'] = df_h['price'].rolling(window=20).mean()
+                    df_h['STD_20'] = df_h['price'].rolling(window=20).std()
+                    df_h['Z_Score'] = (df_h['price'] - df_h['SMA_20']) / df_h['STD_20']
                     
                     delta = df_h['price'].diff()
                     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
@@ -87,13 +88,15 @@ with tab1:
                     rs = gain / loss
                     df_h['RSI_14'] = 100 - (100 / (1 + rs))
                     
+                    df_h['Vol_SMA_20'] = df_h['volume'].rolling(window=20).mean()
                     ema_12 = df_h['price'].ewm(span=12, adjust=False).mean()
                     ema_26 = df_h['price'].ewm(span=26, adjust=False).mean()
                     df_h['MACD'] = ema_12 - ema_26
                     df_h['MACD_Signal'] = df_h['MACD'].ewm(span=9, adjust=False).mean()
                     
-                    # Closed Candle Lock (Hourly)
+                    # Closed Candle Lock
                     closed_p = df_h['price'].iloc[-2]
+                    closed_z = df_h['Z_Score'].iloc[-2]
                     closed_vol = df_h['volume'].iloc[-2]
                     closed_vol_sma = df_h['Vol_SMA_20'].iloc[-2]
                     closed_rsi = df_h['RSI_14'].iloc[-2]
@@ -106,35 +109,33 @@ with tab1:
                     past_low_p = past_30.loc[lowest_idx, 'price']
                     past_low_rsi = past_30.loc[lowest_idx, 'RSI_14']
                     
-                    is_divergence = (closed_p < past_low_p) and (closed_rsi > past_low_rsi) and (closed_rsi < 45)
+                    is_divergence = (closed_p < past_low_p) and (closed_rsi > past_low_rsi) and (closed_z < 0)
                     
-                    # --- SCORING CALIBRATION ---
+                    # --- NORMALIZED SCORING MATRIX ---
                     score = 0
                     
-                    # 1. Macro Trend Check
                     if macro_trend_bullish: score += 25
                     
-                    # 2. Intraday Reversal Filter
+                    # Replaced RSI with Z-Score
                     if is_divergence: score += 40
-                    elif closed_rsi <= 32: score += 25
-                    elif closed_rsi <= 42: score += 15
-                    elif closed_rsi >= 70: score -= 40
+                    elif closed_z <= -2.0: score += 25
+                    elif closed_z <= -1.5: score += 15
+                    elif closed_z >= 1.5: score -= 40 
                     
-                    # 3. Momentum & Volume
                     if closed_macd > closed_sig: score += 25
                     if closed_vol > (closed_vol_sma * 1.2): score += 25
                     
                     final_score = max(0, min(100, score))
                     
-                    # --- VETO GENERATOR ---
+                    # --- DYNAMIC VETOES ---
                     if not macro_trend_bullish:
                         verdict = "🔴 PASS (Macro Downtrend Veto)"
-                    elif closed_rsi >= 75:
-                        verdict = "🔴 PASS (Overbought Exhaustion)"
+                    elif closed_z >= 2.0:
+                        verdict = "🔴 PASS (Statistical Exhaustion)"
                     elif final_score >= 80 and is_divergence:
                         verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
                     elif final_score >= 70:
-                        verdict = "🟢 GRADE-A BUY (Confirmed Pullback)"
+                        verdict = "🟢 GRADE-A BUY (Confirmed Z-Dip)"
                     elif final_score >= 50:
                         verdict = "🟡 WATCHLIST (Forming Setup)"
                     else:
@@ -146,7 +147,7 @@ with tab1:
                         "Asset": coin_name,
                         "Price": price_fmt,
                         "Daily Trend": "Bullish" if macro_trend_bullish else "Bearish",
-                        "1H RSI": round(closed_rsi, 1),
+                        "Z-Score": round(closed_z, 2),
                         "Divergence": "🔥 YES" if is_divergence else "No",
                         "Score": f"{final_score}/100",
                         "Verdict": verdict
@@ -156,7 +157,7 @@ with tab1:
                 pass
                 
             progress_bar.progress((idx + 1) / total_coins)
-            time.sleep(1.5) # Rate limit protection
+            time.sleep(1.5) 
             
         status_text.empty()
         progress_bar.empty()
