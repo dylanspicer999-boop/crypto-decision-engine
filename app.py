@@ -6,7 +6,7 @@ import time
 # --- UI Setup ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
 st.title("🏛️ Apex Crypto Terminal")
-st.markdown("Live Institutional Confluence Matrix & Risk Manager")
+st.markdown("Live Institutional Dual-Timeframe Matrix & Risk Manager")
 
 # --- Secure API Keys ---
 try:
@@ -34,7 +34,7 @@ if 'positions' not in st.session_state:
 tab1, tab2 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker"])
 
 # ==========================================
-# TAB 1: RADAR SCANNER (DIVERGENCE ENGINE)
+# TAB 1: RADAR SCANNER (DUAL-TIMEFRAME)
 # ==========================================
 with tab1:
     if st.button("🔄 Run Live Market Scan", type="primary"):
@@ -45,69 +45,91 @@ with tab1:
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Analyzing {coin_name}...")
+            status_text.text(f"Fetching Multi-Timeframe Data for {coin_name}...")
             try:
-                url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
-                res = requests.get(url, headers=headers, timeout=10)
+                # 1. PULL DAILY MACRO DATA
+                url_daily = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=100&interval=daily"
+                res_daily = requests.get(url_daily, headers=headers, timeout=10)
+                time.sleep(1.5) # Rate limit protection
                 
-                if res.status_code == 200:
-                    data = res.json()
-                    prices = [item[1] for item in data['prices']]
-                    volumes = [item[1] for item in data['total_volumes']]
+                # 2. PULL HOURLY INTRADAY DATA
+                url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
+                res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
+                
+                if res_daily.status_code == 200 and res_hourly.status_code == 200:
                     
-                    df = pd.DataFrame({'price': prices, 'volume': volumes})
+                    # --- MACRO ENGINE (DAILY) ---
+                    data_daily = res_daily.json()
+                    prices_d = [item[1] for item in data_daily['prices']]
+                    df_d = pd.DataFrame({'price': prices_d})
                     
-                    if len(df) < 50:
+                    if len(df_d) < 50:
                         continue
+                        
+                    df_d['SMA_50'] = df_d['price'].rolling(window=50).mean()
+                    macro_trend_bullish = df_d['price'].iloc[-2] > df_d['SMA_50'].iloc[-2]
                     
-                    # Indicators
-                    df['SMA_50'] = df['price'].rolling(window=50).mean()
-                    df['Vol_SMA_20'] = df['volume'].rolling(window=20).mean()
+                    # --- TACTICAL ENGINE (HOURLY) ---
+                    data_hourly = res_hourly.json()
+                    prices_h = [item[1] for item in data_hourly['prices']]
+                    volumes_h = [item[1] for item in data_hourly['total_volumes']]
                     
-                    delta = df['price'].diff()
+                    df_h = pd.DataFrame({'price': prices_h, 'volume': volumes_h})
+                    
+                    if len(df_h) < 50:
+                        continue
+                        
+                    df_h['Vol_SMA_20'] = df_h['volume'].rolling(window=20).mean()
+                    
+                    delta = df_h['price'].diff()
                     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
                     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
                     rs = gain / loss
-                    df['RSI_14'] = 100 - (100 / (1 + rs))
+                    df_h['RSI_14'] = 100 - (100 / (1 + rs))
                     
-                    ema_12 = df['price'].ewm(span=12, adjust=False).mean()
-                    ema_26 = df['price'].ewm(span=26, adjust=False).mean()
-                    df['MACD'] = ema_12 - ema_26
-                    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+                    ema_12 = df_h['price'].ewm(span=12, adjust=False).mean()
+                    ema_26 = df_h['price'].ewm(span=26, adjust=False).mean()
+                    df_h['MACD'] = ema_12 - ema_26
+                    df_h['MACD_Signal'] = df_h['MACD'].ewm(span=9, adjust=False).mean()
                     
-                    # Closed Candle Lock
-                    closed_p = df['price'].iloc[-2]
-                    closed_sma = df['SMA_50'].iloc[-2]
-                    closed_vol = df['volume'].iloc[-2]
-                    closed_vol_sma = df['Vol_SMA_20'].iloc[-2]
-                    closed_rsi = df['RSI_14'].iloc[-2]
-                    closed_macd = df['MACD'].iloc[-2]
-                    closed_sig = df['MACD_Signal'].iloc[-2]
+                    # Closed Candle Lock (Hourly)
+                    closed_p = df_h['price'].iloc[-2]
+                    closed_vol = df_h['volume'].iloc[-2]
+                    closed_vol_sma = df_h['Vol_SMA_20'].iloc[-2]
+                    closed_rsi = df_h['RSI_14'].iloc[-2]
+                    closed_macd = df_h['MACD'].iloc[-2]
+                    closed_sig = df_h['MACD_Signal'].iloc[-2]
                     
                     # Divergence Logic
-                    past_30 = df.iloc[-32:-2]
+                    past_30 = df_h.iloc[-32:-2]
                     lowest_idx = past_30['price'].idxmin()
                     past_low_p = past_30.loc[lowest_idx, 'price']
                     past_low_rsi = past_30.loc[lowest_idx, 'RSI_14']
                     
                     is_divergence = (closed_p < past_low_p) and (closed_rsi > past_low_rsi) and (closed_rsi < 45)
                     
-                    # Scoring
+                    # --- SCORING CALIBRATION ---
                     score = 0
-                    if closed_p > closed_sma: score += 25
                     
+                    # 1. Macro Trend Check
+                    if macro_trend_bullish: score += 25
+                    
+                    # 2. Intraday Reversal Filter
                     if is_divergence: score += 40
                     elif closed_rsi <= 32: score += 25
                     elif closed_rsi <= 42: score += 15
                     elif closed_rsi >= 70: score -= 40
                     
+                    # 3. Momentum & Volume
                     if closed_macd > closed_sig: score += 25
                     if closed_vol > (closed_vol_sma * 1.2): score += 25
                     
                     final_score = max(0, min(100, score))
                     
-                    # Verdicts
-                    if closed_rsi >= 75:
+                    # --- VETO GENERATOR ---
+                    if not macro_trend_bullish:
+                        verdict = "🔴 PASS (Macro Downtrend Veto)"
+                    elif closed_rsi >= 75:
                         verdict = "🔴 PASS (Overbought Exhaustion)"
                     elif final_score >= 80 and is_divergence:
                         verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
@@ -122,7 +144,8 @@ with tab1:
                     
                     results.append({
                         "Asset": coin_name,
-                        "Price (Closed)": price_fmt,
+                        "Price": price_fmt,
+                        "Daily Trend": "Bullish" if macro_trend_bullish else "Bearish",
                         "1H RSI": round(closed_rsi, 1),
                         "Divergence": "🔥 YES" if is_divergence else "No",
                         "Score": f"{final_score}/100",
@@ -133,7 +156,7 @@ with tab1:
                 pass
                 
             progress_bar.progress((idx + 1) / total_coins)
-            time.sleep(1.5)
+            time.sleep(1.5) # Rate limit protection
             
         status_text.empty()
         progress_bar.empty()
@@ -173,7 +196,6 @@ with tab2:
         else:
             updated_positions = []
             for pos in st.session_state.positions:
-                # Reverse lookup coin_id from coin_name
                 coin_id = [k for k, v in watchlist.items() if v == pos["Asset"]][0]
                 
                 try:
@@ -182,11 +204,9 @@ with tab2:
                     if res.status_code == 200:
                         curr_price = res.json()[coin_id]['usd']
                         
-                        # Update High Water Mark
                         if curr_price > pos["High Water Mark"]:
                             pos["High Water Mark"] = curr_price
                             
-                        # Calculate Stop
                         stop_loss = pos["High Water Mark"] * (1 - pos["Stop Pct"])
                         pnl_pct = ((curr_price - pos["Entry"]) / pos["Entry"]) * 100
                         
