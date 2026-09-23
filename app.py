@@ -6,7 +6,7 @@ import time
 # --- UI Setup ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
 st.title("🏛️ Apex Crypto Terminal")
-st.markdown("Live Institutional Dual-Timeframe & Volatility Normalized Matrix")
+st.markdown("Live Institutional Dual-Timeframe, Volatility, & Derivatives Matrix")
 
 # --- Secure API Keys ---
 try:
@@ -25,6 +25,17 @@ watchlist = {
     'pepe': 'Pepe', 'chainlink': 'Chainlink', 'uniswap': 'Uniswap',
     'aave': 'Aave', 'compound-governance-token': 'Compound',
     'ripple': 'XRP', 'stellar': 'Stellar'
+}
+
+# Binance Futures Ticker Mapping for Derivatives Data
+ticker_map = {
+    'bitcoin': 'BTCUSDT', 'ethereum': 'ETHUSDT', 'solana': 'SOLUSDT',
+    'cardano': 'ADAUSDT', 'avalanche-2': 'AVAXUSDT', 'litecoin': 'LTCUSDT',
+    'bitcoin-cash': 'BCHUSDT', 'ethereum-classic': 'ETCUSDT',
+    'tezos': 'XTZUSDT', 'dogecoin': 'DOGEUSDT', 'shiba-inu': '1000SHIBUSDT',
+    'pepe': '1000PEPEUSDT', 'chainlink': 'LINKUSDT', 'uniswap': 'UNIUSDT',
+    'aave': 'AAVEUSDT', 'compound-governance-token': 'COMPUSDT',
+    'ripple': 'XRPUSDT', 'stellar': 'XLMUSDT'
 }
 
 # --- Cached Macro Pull ---
@@ -62,12 +73,24 @@ with tab1:
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Analyzing {coin_name}...")
+            status_text.text(f"Fetching Spot & Derivatives Data for {coin_name}...")
             try:
                 macro_trend_bullish = fetch_macro_trend(coin_id)
                 
+                # 1. Spot Price & Volume
                 url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
+                
+                # 2. Perpetual Funding Rate (Binance Futures)
+                funding_rate = 0.0
+                ticker = ticker_map.get(coin_id)
+                if ticker:
+                    try:
+                        res_fr = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={ticker}", timeout=5)
+                        if res_fr.status_code == 200:
+                            funding_rate = float(res_fr.json()['lastFundingRate'])
+                    except:
+                        pass
                 
                 if res_hourly.status_code == 200:
                     data_hourly = res_hourly.json()
@@ -121,9 +144,11 @@ with tab1:
                         
                         final_score = max(0, min(100, score))
                         
-                        # --- MANDATORY Z-SCORE VETO ADDED HERE ---
+                        # --- MANDATORY VETOES WITH FUNDING RATE INCLUDED ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
+                        elif funding_rate >= 0.00045:  # Over 0.045% Funding Rate Veto
+                            verdict = "🔴 PASS (Liquidation Risk / Crowded Long)"
                         elif closed_z >= 1.5:
                             verdict = "🔴 PASS (Statistical Exhaustion)"
                         elif closed_z > 0:
@@ -138,12 +163,13 @@ with tab1:
                             verdict = "🔴 PASS (Weak Edge)"
                         
                         price_fmt = f"${closed_p:.8f}" if closed_p < 0.01 else f"${closed_p:,.2f}"
+                        funding_fmt = f"{funding_rate * 100:.4f}%"
                         
                         results.append({
                             "Asset": coin_name,
                             "Price": price_fmt,
-                            "Daily Trend": "Bullish" if macro_trend_bullish else "Bearish",
                             "Z-Score": round(closed_z, 2),
+                            "Funding Rate": funding_fmt,
                             "Divergence": "🔥 YES" if is_divergence else "No",
                             "Score": f"{final_score}/100",
                             "Verdict": verdict
