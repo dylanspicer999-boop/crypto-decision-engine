@@ -4,16 +4,16 @@ import pandas as pd
 import time
 import plotly.graph_objects as go
 
-# --- UI Setup ---
+# --- UI Configuration ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
 st.title("🏛️ Apex Crypto Terminal")
-st.markdown("Live Institutional Dual-Timeframe, Volatility, & Derivatives Matrix")
+st.markdown("Institutional Dual-Timeframe, Volatility, & Derivatives Decision Engine")
 
-# --- Secure API Keys ---
+# --- Secrets & API Keys ---
 try:
     CG_API_KEY = st.secrets["CG_API_KEY"]
-except:
-    st.warning("⚠️ API Key not found in secrets. Using public limits.")
+except Exception:
+    st.warning("⚠️ CoinGecko API key not configured in secrets. Falling back to public rate limits.")
     CG_API_KEY = ""
 
 headers = {"x-cg-demo-api-key": CG_API_KEY}
@@ -38,7 +38,7 @@ ticker_map = {
     'ripple': 'XRP', 'stellar': 'XLM'
 }
 
-# --- Cached Macro Pull ---
+# --- Data Fetching Helpers ---
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_macro_trend(coin_id):
     try:
@@ -55,7 +55,6 @@ def fetch_macro_trend(coin_id):
         pass
     return False
 
-# --- Master Bulk Fetch for Derivatives (Funding & Open Interest) ---
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_hyperliquid_derivatives():
     derivatives = {}
@@ -74,21 +73,30 @@ def fetch_hyperliquid_derivatives():
                 funding = float(asset_ctxs[i].get("funding", 0.0))
                 oi_coins = float(asset_ctxs[i].get("openInterest", 0.0))
                 mark_px = float(asset_ctxs[i].get("markPx", 0.0))
-                
-                # OI Notional = openInterest * markPx
-                oi_notional = oi_coins * mark_px
-                
                 derivatives[coin_symbol] = {
                     "funding": funding,
-                    "oi_notional": oi_notional
+                    "oi_notional": oi_coins * mark_px
                 }
     except Exception:
         pass
     return derivatives
 
+@st.cache_data(ttl=20, show_spinner=False)
+def fetch_single_spot_price(coin_id):
+    try:
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            return float(res.json()[coin_id]['usd'])
+    except Exception:
+        pass
+    return 0.0
+
 # --- State Management ---
 if 'positions' not in st.session_state:
     st.session_state.positions = []
+if 'scan_data' not in st.session_state:
+    st.session_state.scan_data = []
 
 tab1, tab2 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker"])
 
@@ -96,21 +104,23 @@ tab1, tab2 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker"])
 # TAB 1: RADAR SCANNER
 # ==========================================
 with tab1:
-    if st.button("🔄 Run Live Market Scan", type="primary"):
+    col_scan, _ = st.columns([1, 4])
+    with col_scan:
+        scan_clicked = st.button("🔄 Run Live Market Scan", type="primary", use_container_width=True)
+
+    if scan_clicked:
         progress_bar = st.progress(0)
         status_text = st.empty()
-        results = []
+        fresh_results = []
         
-        status_text.text("Pulling Global Derivatives Data...")
+        status_text.text("Acquiring Global Derivatives Data...")
         derivatives_data = fetch_hyperliquid_derivatives()
-        
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Fetching Data for {coin_name}...")
+            status_text.text(f"Analyzing {coin_name}...")
             try:
                 macro_trend_bullish = fetch_macro_trend(coin_id)
-                
                 url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
                 
@@ -123,7 +133,6 @@ with tab1:
                     data_hourly = res_hourly.json()
                     prices_h = [item[1] for item in data_hourly['prices']]
                     volumes_h = [item[1] for item in data_hourly['total_volumes']]
-                    
                     df_h = pd.DataFrame({'price': prices_h, 'volume': volumes_h})
                     
                     if len(df_h) >= 50:
@@ -170,7 +179,7 @@ with tab1:
                         
                         final_score = max(0, min(100, score))
                         
-                        # --- OI-ENHANCED VETO SYSTEM ---
+                        # --- Veto Hierarchy ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
                         elif funding_rate >= 0.00045:
@@ -196,7 +205,6 @@ with tab1:
                         price_fmt = f"${closed_p:.8f}" if closed_p < 0.01 else f"${closed_p:,.2f}"
                         funding_fmt = f"{funding_rate * 100:.4f}%"
                         
-                        # Format OI for readability
                         if oi >= 1e9:
                             oi_fmt = f"${oi/1e9:.2f}B"
                         elif oi >= 1e6:
@@ -204,7 +212,7 @@ with tab1:
                         else:
                             oi_fmt = f"${oi:,.0f}"
                             
-                        results.append({
+                        fresh_results.append({
                             "Asset": coin_name,
                             "Price": price_fmt,
                             "Z-Score": round(closed_z, 2),
@@ -212,7 +220,10 @@ with tab1:
                             "Open Interest": oi_fmt,
                             "Divergence": "🔥 YES" if is_divergence else "No",
                             "Score": f"{final_score}/100",
-                            "Verdict": verdict
+                            "Verdict": verdict,
+                            "_raw_score": final_score,
+                            "_raw_z": closed_z,
+                            "_raw_oi": oi
                         })
             except Exception:
                 pass
@@ -222,10 +233,41 @@ with tab1:
             
         status_text.empty()
         progress_bar.empty()
+        st.session_state.scan_data = fresh_results
+
+    # --- Sorter & Filter Control Panel ---
+    if st.session_state.scan_data:
+        st.markdown("### ⚙️ Scan Controls")
+        f1, f2 = st.columns([1, 1])
+        with f1:
+            view_filter = st.selectbox(
+                "Filter Signals",
+                ["All Assets", "Active Setups Only (Buys & Watchlist)", "Confirmed Buys Only (Grade-A & Sniper)"]
+            )
+        with f2:
+            sort_by = st.selectbox(
+                "Sort Table By",
+                ["Score (Highest First)", "Z-Score (Most Oversold)", "Open Interest (Largest First)"]
+            )
+            
+        df_display = pd.DataFrame(st.session_state.scan_data)
         
-        if results:
-            results_df = pd.DataFrame(results)
-            st.dataframe(results_df, use_container_width=True, hide_index=True)
+        # Apply Filters
+        if view_filter == "Active Setups Only (Buys & Watchlist)":
+            df_display = df_display[df_display['Verdict'].str.contains("🟢|🟡")]
+        elif view_filter == "Confirmed Buys Only (Grade-A & Sniper)":
+            df_display = df_display[df_display['Verdict'].str.contains("🟢")]
+            
+        # Apply Sorting
+        if sort_by == "Score (Highest First)":
+            df_display = df_display.sort_values(by="_raw_score", ascending=False)
+        elif sort_by == "Z-Score (Most Oversold)":
+            df_display = df_display.sort_values(by="_raw_z", ascending=True)
+        elif sort_by == "Open Interest (Largest First)":
+            df_display = df_display.sort_values(by="_raw_oi", ascending=False)
+            
+        visible_columns = ["Asset", "Price", "Z-Score", "Funding Rate", "Open Interest", "Divergence", "Score", "Verdict"]
+        st.dataframe(df_display[visible_columns], use_container_width=True, hide_index=True)
 
     # --- Interactive Chart Inspection ---
     st.markdown("---")
@@ -260,77 +302,98 @@ with tab1:
 # TAB 2: SENTINEL TRACKER
 # ==========================================
 with tab2:
-    st.subheader("Dynamic Trailing Stop & Risk Manager")
+    st.subheader("Dynamic Trailing Stop, Asymmetric TP Brackets, & Risk Manager")
     
-    with st.expander("➕ Log New Trade & Calculate Position Size"):
-        st.markdown("**1. Institutional Position Sizing**")
+    with st.expander("➕ Log New Trade & Calculate Position Size", expanded=True):
+        st.markdown("**1. Portfolio Risk Limits**")
         c1, c2 = st.columns(2)
         with c1:
-            port_size = st.number_input("Total Portfolio Size ($)", min_value=100.0, value=5000.0, step=500.0)
+            port_size = st.number_input("Total Portfolio Size ($)", min_value=50.0, value=5000.0, step=250.0)
         with c2:
-            max_risk = st.number_input("Max Risk per Trade (%)", min_value=0.1, max_value=10.0, value=2.0, step=0.1)
+            max_risk = st.number_input("Risk Limit per Trade (%)", min_value=0.1, max_value=10.0, value=2.0, step=0.1)
             
-        st.markdown("**2. Trade Parameters**")
+        st.markdown("**2. Trade Configuration**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            trade_asset = st.selectbox("Asset", list(watchlist.values()))
+            trade_asset = st.selectbox("Select Asset to Trade", list(watchlist.values()))
+            selected_coin_id = [k for k, v in watchlist.items() if v == trade_asset][0]
+            live_price_estimate = fetch_single_spot_price(selected_coin_id)
         with col2:
-            trade_entry = st.number_input("Entry Price ($)", min_value=0.000001, format="%.6f", value=100.0)
+            default_entry = live_price_estimate if live_price_estimate > 0 else 1.0
+            trade_entry = st.number_input("Entry Price ($)", min_value=0.00000001, format="%.6f", value=default_entry)
         with col3:
             trade_stop_pct = st.number_input("Trailing Stop (%)", min_value=0.1, max_value=50.0, value=4.0, step=0.5)
             
-        risk_dollar_amount = port_size * (max_risk / 100)
-        suggested_position = risk_dollar_amount / (trade_stop_pct / 100)
+        risk_dollar_budget = port_size * (max_risk / 100.0)
+        stop_fraction = trade_stop_pct / 100.0
+        suggested_position = risk_dollar_budget / stop_fraction
         
-        st.info(f"**Action Plan:** Risking **${risk_dollar_amount:,.2f}** with a **{trade_stop_pct}%** trailing stop requires a position size of **${suggested_position:,.2f}**.")
+        # Take-Profit Target Calculations (1.5R and 3.0R)
+        risk_per_coin = trade_entry * stop_fraction
+        target_1 = trade_entry + (1.5 * risk_per_coin)
+        target_2 = trade_entry + (3.0 * risk_per_coin)
+        
+        st.info(
+            f"**Execution Blueprint:** Max dollar loss: **${risk_dollar_budget:,.2f}** | "
+            f"Allocated position size: **${suggested_position:,.2f}**\n\n"
+            f"🎯 **Target 1 (+1.5R):** ${target_1:,.4f} | 🎯 **Target 2 (+3.0R):** ${target_2:,.4f}"
+        )
             
-        if st.button("Log Position with Suggested Size"):
+        if st.button("Commit Trade to Sentinel"):
             st.session_state.positions.append({
                 "Asset": trade_asset,
                 "Entry": trade_entry,
                 "High Water Mark": trade_entry,
-                "Stop Pct": trade_stop_pct / 100.0,
-                "Size": suggested_position
+                "Stop Pct": stop_fraction,
+                "Size": suggested_position,
+                "TP1": target_1,
+                "TP2": target_2
             })
-            st.success(f"Logged {trade_asset} at ${trade_entry:,.2f} with size ${suggested_position:,.2f}")
+            st.success(f"Position active: {trade_asset} logged at ${trade_entry:,.4f}")
 
     st.subheader("Active Positions")
-    if st.button("🛡️ Refresh Sentinel", type="primary"):
+    if st.button("🛡️ Refresh Sentinel & Check Brackets", type="primary"):
         if not st.session_state.positions:
-            st.info("No active positions logged.")
+            st.info("No active positions currently logged.")
         else:
             updated_positions = []
             for pos in st.session_state.positions:
                 coin_id = [k for k, v in watchlist.items() if v == pos["Asset"]][0]
                 try:
-                    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-                    res = requests.get(url, headers=headers, timeout=10)
-                    if res.status_code == 200:
-                        curr_price = res.json()[coin_id]['usd']
+                    curr_price = fetch_single_spot_price(coin_id)
+                    if curr_price > 0:
                         if curr_price > pos["High Water Mark"]:
                             pos["High Water Mark"] = curr_price
                             
                         stop_loss = pos["High Water Mark"] * (1 - pos["Stop Pct"])
                         pnl_pct = ((curr_price - pos["Entry"]) / pos["Entry"]) * 100
-                        
-                        # Calculate exact PnL dollars
                         position_size = pos.get("Size", 0)
-                        pnl_dollars = position_size * (pnl_pct / 100)
+                        pnl_dollars = position_size * (pnl_pct / 100.0)
                         
-                        action = "🟢 HOLD" if curr_price > stop_loss else "🔴 SELL (Stop Triggered)"
+                        # Bracket State Engine
+                        if curr_price <= stop_loss:
+                            action = "🔴 STOPPED OUT (Exit Position)"
+                        elif curr_price >= pos.get("TP2", 0.0):
+                            action = "🎯 TP2 REACHED (+3.0R Full Take-Profit)"
+                        elif curr_price >= pos.get("TP1", 0.0):
+                            action = "🎯 TP1 REACHED (+1.5R Scale Out 50%)"
+                        else:
+                            action = "🟢 HOLD"
                         
                         updated_positions.append({
                             "Asset": pos["Asset"],
                             "Size": f"${position_size:,.2f}",
                             "Entry": f"${pos['Entry']:,.4f}",
-                            "Current Price": f"${curr_price:,.4f}",
+                            "Current": f"${curr_price:,.4f}",
                             "Stop Loss": f"${stop_loss:,.4f}",
+                            "TP1 (1.5R)": f"${pos.get('TP1', 0.0):,.4f}",
+                            "TP2 (3.0R)": f"${pos.get('TP2', 0.0):,.4f}",
                             "P&L": f"{pnl_pct:+.2f}% (${pnl_dollars:+.2f})",
                             "Action": action
                         })
                 except Exception:
                     pass
-                time.sleep(1.2)
+                time.sleep(1.0)
                 
             if updated_positions:
                 st.dataframe(pd.DataFrame(updated_positions), use_container_width=True, hide_index=True)
