@@ -55,10 +55,10 @@ def fetch_macro_trend(coin_id):
         pass
     return False
 
-# --- Hyperliquid Funding Rates ---
+# --- Master Bulk Fetch for Derivatives (Funding & Open Interest) ---
 @st.cache_data(ttl=60, show_spinner=False)
-def fetch_all_funding_rates():
-    rates = {}
+def fetch_hyperliquid_derivatives():
+    derivatives = {}
     try:
         url = "https://api.hyperliquid.xyz/info"
         headers_hl = {"Content-Type": "application/json"}
@@ -72,10 +72,19 @@ def fetch_all_funding_rates():
             for i, asset in enumerate(universe):
                 coin_symbol = asset.get("name")
                 funding = float(asset_ctxs[i].get("funding", 0.0))
-                rates[coin_symbol] = funding
+                oi_coins = float(asset_ctxs[i].get("openInterest", 0.0))
+                mark_px = float(asset_ctxs[i].get("markPx", 0.0))
+                
+                # OI Notional = openInterest * markPx
+                oi_notional = oi_coins * mark_px
+                
+                derivatives[coin_symbol] = {
+                    "funding": funding,
+                    "oi_notional": oi_notional
+                }
     except Exception:
         pass
-    return rates
+    return derivatives
 
 # --- State Management ---
 if 'positions' not in st.session_state:
@@ -93,7 +102,7 @@ with tab1:
         results = []
         
         status_text.text("Pulling Global Derivatives Data...")
-        funding_data = fetch_all_funding_rates()
+        derivatives_data = fetch_hyperliquid_derivatives()
         
         total_coins = len(watchlist)
         
@@ -106,7 +115,9 @@ with tab1:
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
                 
                 ticker = ticker_map.get(coin_id)
-                funding_rate = funding_data.get(ticker, 0.0)
+                ticker_data = derivatives_data.get(ticker, {"funding": 0.0, "oi_notional": 0.0})
+                funding_rate = ticker_data["funding"]
+                oi = ticker_data["oi_notional"]
                 
                 if res_hourly.status_code == 200:
                     data_hourly = res_hourly.json()
@@ -149,7 +160,6 @@ with tab1:
                         
                         score = 0
                         if macro_trend_bullish: score += 25
-                        
                         if is_divergence: score += 40
                         elif closed_z <= -2.0: score += 25
                         elif closed_z <= -1.0: score += 15
@@ -160,7 +170,7 @@ with tab1:
                         
                         final_score = max(0, min(100, score))
                         
-                        # --- RE-CALIBRATED VETO SYSTEM ---
+                        # --- OI-ENHANCED VETO SYSTEM ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
                         elif funding_rate >= 0.00045:
@@ -170,7 +180,10 @@ with tab1:
                         elif closed_z > 0:
                             verdict = "🔴 PASS (No Dip Detected)"
                         elif final_score >= 80 and is_divergence and closed_z <= -1.0:
-                            verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
+                            if oi > 50_000_000:
+                                verdict = "🟢 SNIPER ENTRY (High-Conviction Squeeze)"
+                            else:
+                                verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
                         elif final_score >= 70 and closed_z <= -1.0:
                             verdict = "🟢 GRADE-A BUY (Confirmed Z-Dip)"
                         elif closed_z > -1.0:
@@ -183,11 +196,20 @@ with tab1:
                         price_fmt = f"${closed_p:.8f}" if closed_p < 0.01 else f"${closed_p:,.2f}"
                         funding_fmt = f"{funding_rate * 100:.4f}%"
                         
+                        # Format OI for readability
+                        if oi >= 1e9:
+                            oi_fmt = f"${oi/1e9:.2f}B"
+                        elif oi >= 1e6:
+                            oi_fmt = f"${oi/1e6:.2f}M"
+                        else:
+                            oi_fmt = f"${oi:,.0f}"
+                            
                         results.append({
                             "Asset": coin_name,
                             "Price": price_fmt,
                             "Z-Score": round(closed_z, 2),
                             "Funding Rate": funding_fmt,
+                            "Open Interest": oi_fmt,
                             "Divergence": "🔥 YES" if is_divergence else "No",
                             "Score": f"{final_score}/100",
                             "Verdict": verdict
@@ -238,25 +260,39 @@ with tab1:
 # TAB 2: SENTINEL TRACKER
 # ==========================================
 with tab2:
-    st.subheader("Dynamic Trailing Stop Manager")
+    st.subheader("Dynamic Trailing Stop & Risk Manager")
     
-    with st.expander("➕ Log New Trade"):
+    with st.expander("➕ Log New Trade & Calculate Position Size"):
+        st.markdown("**1. Institutional Position Sizing**")
+        c1, c2 = st.columns(2)
+        with c1:
+            port_size = st.number_input("Total Portfolio Size ($)", min_value=100.0, value=5000.0, step=500.0)
+        with c2:
+            max_risk = st.number_input("Max Risk per Trade (%)", min_value=0.1, max_value=10.0, value=2.0, step=0.1)
+            
+        st.markdown("**2. Trade Parameters**")
         col1, col2, col3 = st.columns(3)
         with col1:
             trade_asset = st.selectbox("Asset", list(watchlist.values()))
         with col2:
-            trade_entry = st.number_input("Entry Price ($)", min_value=0.000001, format="%.6f")
+            trade_entry = st.number_input("Entry Price ($)", min_value=0.000001, format="%.6f", value=100.0)
         with col3:
             trade_stop_pct = st.number_input("Trailing Stop (%)", min_value=0.1, max_value=50.0, value=4.0, step=0.5)
             
-        if st.button("Log Position"):
+        risk_dollar_amount = port_size * (max_risk / 100)
+        suggested_position = risk_dollar_amount / (trade_stop_pct / 100)
+        
+        st.info(f"**Action Plan:** Risking **${risk_dollar_amount:,.2f}** with a **{trade_stop_pct}%** trailing stop requires a position size of **${suggested_position:,.2f}**.")
+            
+        if st.button("Log Position with Suggested Size"):
             st.session_state.positions.append({
                 "Asset": trade_asset,
                 "Entry": trade_entry,
                 "High Water Mark": trade_entry,
-                "Stop Pct": trade_stop_pct / 100.0
+                "Stop Pct": trade_stop_pct / 100.0,
+                "Size": suggested_position
             })
-            st.success(f"Logged {trade_asset} at ${trade_entry}")
+            st.success(f"Logged {trade_asset} at ${trade_entry:,.2f} with size ${suggested_position:,.2f}")
 
     st.subheader("Active Positions")
     if st.button("🛡️ Refresh Sentinel", type="primary"):
@@ -276,15 +312,20 @@ with tab2:
                             
                         stop_loss = pos["High Water Mark"] * (1 - pos["Stop Pct"])
                         pnl_pct = ((curr_price - pos["Entry"]) / pos["Entry"]) * 100
+                        
+                        # Calculate exact PnL dollars
+                        position_size = pos.get("Size", 0)
+                        pnl_dollars = position_size * (pnl_pct / 100)
+                        
                         action = "🟢 HOLD" if curr_price > stop_loss else "🔴 SELL (Stop Triggered)"
                         
                         updated_positions.append({
                             "Asset": pos["Asset"],
-                            "Entry": f"${pos['Entry']:.4f}",
-                            "Current Price": f"${curr_price:.4f}",
-                            "High Water Mark": f"${pos['High Water Mark']:.4f}",
-                            "Stop Loss": f"${stop_loss:.4f}",
-                            "P&L": f"{pnl_pct:+.2f}%",
+                            "Size": f"${position_size:,.2f}",
+                            "Entry": f"${pos['Entry']:,.4f}",
+                            "Current Price": f"${curr_price:,.4f}",
+                            "Stop Loss": f"${stop_loss:,.4f}",
+                            "P&L": f"{pnl_pct:+.2f}% (${pnl_dollars:+.2f})",
                             "Action": action
                         })
                 except Exception:
