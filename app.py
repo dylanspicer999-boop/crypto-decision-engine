@@ -252,13 +252,11 @@ with tab1:
             
         df_display = pd.DataFrame(st.session_state.scan_data)
         
-        # Apply Filters
         if view_filter == "Active Setups Only (Buys & Watchlist)":
             df_display = df_display[df_display['Verdict'].str.contains("🟢|🟡")]
         elif view_filter == "Confirmed Buys Only (Grade-A & Sniper)":
             df_display = df_display[df_display['Verdict'].str.contains("🟢")]
             
-        # Apply Sorting
         if sort_by == "Score (Highest First)":
             df_display = df_display.sort_values(by="_raw_score", ascending=False)
         elif sort_by == "Z-Score (Most Oversold)":
@@ -334,9 +332,9 @@ with tab2:
         target_2 = trade_entry + (3.0 * risk_per_coin)
         
         st.info(
-            f"**Execution Blueprint:** Max dollar loss: **${risk_dollar_budget:,.2f}** | "
-            f"Allocated position size: **${suggested_position:,.2f}**\n\n"
-            f"🎯 **Target 1 (+1.5R):** ${target_1:,.4f} | 🎯 **Target 2 (+3.0R):** ${target_2:,.4f}"
+            f"**Execution Blueprint:** Max dollar loss: **\\${risk_dollar_budget:,.2f}** | "
+            f"Allocated position size: **\\${suggested_position:,.2f}**\n\n"
+            f"🎯 **Target 1 (+1.5R):** \\${target_1:,.4f} | 🎯 **Target 2 (+3.0R):** \\${target_2:,.4f}"
         )
             
         if st.button("Commit Trade to Sentinel"):
@@ -349,7 +347,7 @@ with tab2:
                 "TP1": target_1,
                 "TP2": target_2
             })
-            st.success(f"Position active: {trade_asset} logged at ${trade_entry:,.4f}")
+            st.success(f"Position active: {trade_asset} logged at \\${trade_entry:,.4f}")
 
     st.subheader("Active Positions")
     if st.button("🛡️ Refresh Sentinel & Check Brackets", type="primary"):
