@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+import plotly.graph_objects as go
 
 # --- UI Setup ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
@@ -27,7 +28,6 @@ watchlist = {
     'ripple': 'XRP', 'stellar': 'Stellar'
 }
 
-# Hyperliquid DEX Ticker Mapping (Bypasses US IP Blocks)
 ticker_map = {
     'bitcoin': 'BTC', 'ethereum': 'ETH', 'solana': 'SOL',
     'cardano': 'ADA', 'avalanche-2': 'AVAX', 'litecoin': 'LTC',
@@ -55,7 +55,7 @@ def fetch_macro_trend(coin_id):
         pass
     return False
 
-# --- Master Bulk Fetch for Funding Rates via Hyperliquid ---
+# --- Hyperliquid Funding Rates ---
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_all_funding_rates():
     rates = {}
@@ -69,7 +69,6 @@ def fetch_all_funding_rates():
             data = res.json()
             universe = data[0].get("universe", [])
             asset_ctxs = data[1]
-            
             for i, asset in enumerate(universe):
                 coin_symbol = asset.get("name")
                 funding = float(asset_ctxs[i].get("funding", 0.0))
@@ -78,7 +77,7 @@ def fetch_all_funding_rates():
         pass
     return rates
 
-# --- State Management for Sentinel ---
+# --- State Management ---
 if 'positions' not in st.session_state:
     st.session_state.positions = []
 
@@ -99,7 +98,7 @@ with tab1:
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Fetching Spot Data for {coin_name}...")
+            status_text.text(f"Fetching Data for {coin_name}...")
             try:
                 macro_trend_bullish = fetch_macro_trend(coin_id)
                 
@@ -153,14 +152,15 @@ with tab1:
                         
                         if is_divergence: score += 40
                         elif closed_z <= -2.0: score += 25
-                        elif closed_z <= -1.5: score += 15
-                        elif closed_z >= 1.5: score -= 40 
+                        elif closed_z <= -1.0: score += 15
+                        elif closed_z >= 1.5: score -= 40
                         
                         if closed_macd > closed_sig: score += 25
                         if closed_vol > (closed_vol_sma * 1.2): score += 25
                         
                         final_score = max(0, min(100, score))
                         
+                        # --- RE-CALIBRATED VETO SYSTEM ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
                         elif funding_rate >= 0.00045:
@@ -169,10 +169,12 @@ with tab1:
                             verdict = "🔴 PASS (Statistical Exhaustion)"
                         elif closed_z > 0:
                             verdict = "🔴 PASS (No Dip Detected)"
-                        elif final_score >= 80 and is_divergence:
+                        elif final_score >= 80 and is_divergence and closed_z <= -1.0:
                             verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
-                        elif final_score >= 70:
+                        elif final_score >= 70 and closed_z <= -1.0:
                             verdict = "🟢 GRADE-A BUY (Confirmed Z-Dip)"
+                        elif closed_z > -1.0:
+                            verdict = "🟡 WATCHLIST (Mild Pullback)"
                         elif final_score >= 50:
                             verdict = "🟡 WATCHLIST (Forming Setup)"
                         else:
@@ -202,6 +204,35 @@ with tab1:
         if results:
             results_df = pd.DataFrame(results)
             st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+    # --- Interactive Chart Inspection ---
+    st.markdown("---")
+    st.subheader("🔍 Deep Dive Asset Visualizer")
+    selected_coin_name = st.selectbox("Select Asset to Inspect Bands & Momentum", list(watchlist.values()))
+    
+    if st.button("Generate Inspection Chart"):
+        selected_id = [k for k, v in watchlist.items() if v == selected_coin_name][0]
+        url = f"https://api.coingecko.com/api/v3/coins/{selected_id}/market_chart?vs_currency=usd&days=10"
+        res = requests.get(url, headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+            data = res.json()
+            timestamps = [pd.to_datetime(item[0], unit='ms') for item in data['prices']]
+            prices = [item[1] for item in data['prices']]
+            
+            df_chart = pd.DataFrame({'timestamp': timestamps, 'price': prices}).set_index('timestamp')
+            df_chart['SMA_20'] = df_chart['price'].rolling(20).mean()
+            df_chart['Upper_Band'] = df_chart['SMA_20'] + (df_chart['price'].rolling(20).std() * 2)
+            df_chart['Lower_Band'] = df_chart['SMA_20'] - (df_chart['price'].rolling(20).std() * 2)
+            
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['price'], mode='lines', name='Price', line=dict(color='#00FFA3', width=2)))
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['SMA_20'], mode='lines', name='20-SMA (Mean)', line=dict(color='#FFA500', width=1, dash='dash')))
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Upper_Band'], mode='lines', name='+2σ (Exhaustion)', line=dict(color='#FF4B4B', width=1)))
+            fig.add_trace(go.Scatter(x=df_chart.index, y=df_chart['Lower_Band'], mode='lines', name='-2σ (Oversold Dip)', line=dict(color='#00BFFF', width=1)))
+            
+            fig.update_layout(title=f"{selected_coin_name} Volatility Bands (10-Day Hourly)", template="plotly_dark", height=450, margin=dict(l=20, r=20, t=40, b=20))
+            st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
 # TAB 2: SENTINEL TRACKER
