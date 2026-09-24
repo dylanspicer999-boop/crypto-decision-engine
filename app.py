@@ -447,13 +447,19 @@ with tab2:
         st.rerun()
 
 # ==========================================
-# TAB 3: BACKTEST LAB
+# TAB 3: DYNAMIC BACKTEST OPTIMIZER
 # ==========================================
 with tab3:
-    st.subheader("🧪 Quantitative Backtest Engine (90-Day Hourly Data)")
-    st.markdown("Test the mathematical viability of buying the **-1.0 Z-Score Dip** across 2,000+ historical hourly candles before risking capital.")
+    st.subheader("🧪 Dynamic Strategy Optimizer (90-Day Hourly Data)")
+    st.markdown("Fine-tune your quantitative thresholds to find the highest historical win rate for any asset.")
     
-    bt_asset_name = st.selectbox("Select Asset to Backtest", list(watchlist.values()), key="bt_asset")
+    col_bt1, col_bt2, col_bt3 = st.columns(3)
+    with col_bt1:
+        bt_asset_name = st.selectbox("Select Asset to Backtest", list(watchlist.values()), key="bt_asset")
+    with col_bt2:
+        z_threshold = st.slider("Z-Score Entry Threshold", min_value=-3.0, max_value=-0.5, value=-1.0, step=0.1, help="How deep must the dip be to trigger a buy?")
+    with col_bt3:
+        hold_hours = st.select_slider("Holding Timeframe (Hours)", options=[4, 8, 12, 24, 48, 72], value=24, help="How long do we hold the asset after buying the dip?")
     
     if st.button("Run Vectorized Backtest", type="primary"):
         bt_coin_id = [k for k, v in watchlist.items() if v == bt_asset_name][0]
@@ -461,41 +467,39 @@ with tab3:
             df_bt = fetch_backtest_data(bt_coin_id)
             
         if df_bt is not None and len(df_bt) > 50:
-            # Reconstruct the exact quantitative logic
             df_bt['SMA_20'] = df_bt['price'].rolling(window=20).mean()
             df_bt['STD_20'] = df_bt['price'].rolling(window=20).std()
             df_bt['Z_Score'] = (df_bt['price'] - df_bt['SMA_20']) / df_bt['STD_20']
             
-            # Forward return calculation (24 hours after a dip trigger)
-            df_bt['Forward_Return_24h'] = df_bt['price'].shift(-24) / df_bt['price'] - 1
+            # Dynamic forward return calculation based on slider
+            df_bt['Forward_Return'] = df_bt['price'].shift(-hold_hours) / df_bt['price'] - 1
             
-            # Filter for exact Grade-A dip entry conditions
-            buy_signals = df_bt[df_bt['Z_Score'] <= -1.0].dropna(subset=['Forward_Return_24h'])
+            # Filter entries based on dynamic slider
+            buy_signals = df_bt[df_bt['Z_Score'] <= z_threshold].dropna(subset=['Forward_Return'])
             
             total_signals = len(buy_signals)
             if total_signals > 0:
-                winning_trades = buy_signals[buy_signals['Forward_Return_24h'] > 0]
+                winning_trades = buy_signals[buy_signals['Forward_Return'] > 0]
                 win_rate = (len(winning_trades) / total_signals) * 100
-                avg_pnl = buy_signals['Forward_Return_24h'].mean() * 100
-                max_win = buy_signals['Forward_Return_24h'].max() * 100
-                max_loss = buy_signals['Forward_Return_24h'].min() * 100
+                avg_pnl = buy_signals['Forward_Return'].mean() * 100
+                max_win = buy_signals['Forward_Return'].max() * 100
+                max_loss = buy_signals['Forward_Return'].min() * 100
                 
                 st.success(f"Backtest complete. Processed {len(df_bt):,} hourly candles.")
                 
                 col_b1, col_b2, col_b3 = st.columns(3)
                 col_b1.metric("Total Entry Signals Fired", total_signals)
-                col_b2.metric("24-Hour Forward Win Rate", f"{win_rate:.1f}%")
+                col_b2.metric(f"{hold_hours}-Hour Forward Win Rate", f"{win_rate:.1f}%")
                 col_b3.metric("Average Profit per Trade", f"{avg_pnl:+.2f}%")
                 
                 st.markdown(f"**Best Performing Trade:** +{max_win:.2f}% | **Worst Performing Trade:** {max_loss:.2f}%")
                 
-                # Visualizing equity curve or signal scatter
                 fig_bt = go.Figure()
                 fig_bt.add_trace(go.Scatter(x=df_bt.index, y=df_bt['price'], mode='lines', name='Price', line=dict(color='#333333')))
-                fig_bt.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['price'], mode='markers', name='Dip Buy Triggers', marker=dict(color='#00FFA3', size=8, symbol='triangle-up')))
+                fig_bt.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['price'], mode='markers', name=f'Z-Score {z_threshold} Triggers', marker=dict(color='#00FFA3', size=8, symbol='triangle-up')))
                 fig_bt.update_layout(title="Historical Trade Executions", template="plotly_dark", height=400)
                 st.plotly_chart(fig_bt, use_container_width=True)
             else:
-                st.warning("No signals triggered in the last 90 days for this asset under current strict conditions.")
+                st.warning(f"No signals triggered in the last 90 days for {bt_asset_name} at a strict Z-Score of {z_threshold}.")
         else:
             st.error("Failed to retrieve sufficient historical data. API may be rate limited.")
