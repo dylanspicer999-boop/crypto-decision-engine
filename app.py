@@ -27,7 +27,7 @@ watchlist = {
     'ripple': 'XRP', 'stellar': 'Stellar'
 }
 
-# Binance Futures Ticker Mapping for Derivatives Data
+# Bybit Futures Ticker Mapping
 ticker_map = {
     'bitcoin': 'BTCUSDT', 'ethereum': 'ETHUSDT', 'solana': 'SOLUSDT',
     'cardano': 'ADAUSDT', 'avalanche-2': 'AVAXUSDT', 'litecoin': 'LTCUSDT',
@@ -38,7 +38,7 @@ ticker_map = {
     'ripple': 'XRPUSDT', 'stellar': 'XLMUSDT'
 }
 
-# --- Cached Macro Pull ---
+# --- Cached Data Pulls ---
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_macro_trend(coin_id):
     try:
@@ -55,6 +55,19 @@ def fetch_macro_trend(coin_id):
         pass
     return False
 
+# NEW: Master Bulk Fetch for Funding Rates
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_all_funding_rates():
+    rates = {}
+    try:
+        res = requests.get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=10)
+        if res.status_code == 200:
+            for item in res.json().get('result', {}).get('list', []):
+                rates[item['symbol']] = float(item['fundingRate'])
+    except Exception:
+        pass
+    return rates
+
 # --- State Management for Sentinel ---
 if 'positions' not in st.session_state:
     st.session_state.positions = []
@@ -70,27 +83,23 @@ with tab1:
         status_text = st.empty()
         results = []
         
+        # 1. Fetch Master Funding Rates Once
+        status_text.text("Pulling Global Derivatives Data...")
+        funding_data = fetch_all_funding_rates()
+        
         total_coins = len(watchlist)
         
         for idx, (coin_id, coin_name) in enumerate(watchlist.items()):
-            status_text.text(f"Fetching Spot & Derivatives Data for {coin_name}...")
+            status_text.text(f"Fetching Spot Data for {coin_name}...")
             try:
                 macro_trend_bullish = fetch_macro_trend(coin_id)
                 
-                # 1. Spot Price & Volume
                 url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
                 
-                # 2. Perpetual Funding Rate (Binance Futures)
-                funding_rate = 0.0
+                # Assign Cached Funding Rate instantly
                 ticker = ticker_map.get(coin_id)
-                if ticker:
-                    try:
-                        res_fr = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={ticker}", timeout=5)
-                        if res_fr.status_code == 200:
-                            funding_rate = float(res_fr.json()['lastFundingRate'])
-                    except:
-                        pass
+                funding_rate = funding_data.get(ticker, 0.0)
                 
                 if res_hourly.status_code == 200:
                     data_hourly = res_hourly.json()
@@ -147,7 +156,7 @@ with tab1:
                         # --- MANDATORY VETOES WITH FUNDING RATE INCLUDED ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
-                        elif funding_rate >= 0.00045:  # Over 0.045% Funding Rate Veto
+                        elif funding_rate >= 0.00045:
                             verdict = "🔴 PASS (Liquidation Risk / Crowded Long)"
                         elif closed_z >= 1.5:
                             verdict = "🔴 PASS (Statistical Exhaustion)"
