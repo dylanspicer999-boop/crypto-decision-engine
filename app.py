@@ -27,18 +27,18 @@ watchlist = {
     'ripple': 'XRP', 'stellar': 'Stellar'
 }
 
-# Bybit Futures Ticker Mapping
+# Hyperliquid DEX Ticker Mapping (Bypasses US IP Blocks)
 ticker_map = {
-    'bitcoin': 'BTCUSDT', 'ethereum': 'ETHUSDT', 'solana': 'SOLUSDT',
-    'cardano': 'ADAUSDT', 'avalanche-2': 'AVAXUSDT', 'litecoin': 'LTCUSDT',
-    'bitcoin-cash': 'BCHUSDT', 'ethereum-classic': 'ETCUSDT',
-    'tezos': 'XTZUSDT', 'dogecoin': 'DOGEUSDT', 'shiba-inu': '1000SHIBUSDT',
-    'pepe': '1000PEPEUSDT', 'chainlink': 'LINKUSDT', 'uniswap': 'UNIUSDT',
-    'aave': 'AAVEUSDT', 'compound-governance-token': 'COMPUSDT',
-    'ripple': 'XRPUSDT', 'stellar': 'XLMUSDT'
+    'bitcoin': 'BTC', 'ethereum': 'ETH', 'solana': 'SOL',
+    'cardano': 'ADA', 'avalanche-2': 'AVAX', 'litecoin': 'LTC',
+    'bitcoin-cash': 'BCH', 'ethereum-classic': 'ETC',
+    'tezos': 'XTZ', 'dogecoin': 'DOGE', 'shiba-inu': 'SHIB',
+    'pepe': 'PEPE', 'chainlink': 'LINK', 'uniswap': 'UNI',
+    'aave': 'AAVE', 'compound-governance-token': 'COMP',
+    'ripple': 'XRP', 'stellar': 'XLM'
 }
 
-# --- Cached Data Pulls ---
+# --- Cached Macro Pull ---
 @st.cache_data(ttl=43200, show_spinner=False)
 def fetch_macro_trend(coin_id):
     try:
@@ -55,15 +55,25 @@ def fetch_macro_trend(coin_id):
         pass
     return False
 
-# NEW: Master Bulk Fetch for Funding Rates
+# --- Master Bulk Fetch for Funding Rates via Hyperliquid ---
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_all_funding_rates():
     rates = {}
     try:
-        res = requests.get("https://api.bybit.com/v5/market/tickers?category=linear", timeout=10)
+        url = "https://api.hyperliquid.xyz/info"
+        headers_hl = {"Content-Type": "application/json"}
+        payload = {"type": "metaAndAssetCtxs"}
+        res = requests.post(url, headers=headers_hl, json=payload, timeout=10)
+        
         if res.status_code == 200:
-            for item in res.json().get('result', {}).get('list', []):
-                rates[item['symbol']] = float(item['fundingRate'])
+            data = res.json()
+            universe = data[0].get("universe", [])
+            asset_ctxs = data[1]
+            
+            for i, asset in enumerate(universe):
+                coin_symbol = asset.get("name")
+                funding = float(asset_ctxs[i].get("funding", 0.0))
+                rates[coin_symbol] = funding
     except Exception:
         pass
     return rates
@@ -83,7 +93,6 @@ with tab1:
         status_text = st.empty()
         results = []
         
-        # 1. Fetch Master Funding Rates Once
         status_text.text("Pulling Global Derivatives Data...")
         funding_data = fetch_all_funding_rates()
         
@@ -97,7 +106,6 @@ with tab1:
                 url_hourly = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=10"
                 res_hourly = requests.get(url_hourly, headers=headers, timeout=10)
                 
-                # Assign Cached Funding Rate instantly
                 ticker = ticker_map.get(coin_id)
                 funding_rate = funding_data.get(ticker, 0.0)
                 
@@ -153,7 +161,6 @@ with tab1:
                         
                         final_score = max(0, min(100, score))
                         
-                        # --- MANDATORY VETOES WITH FUNDING RATE INCLUDED ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
                         elif funding_rate >= 0.00045:
