@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import time
 import plotly.graph_objects as go
+import numpy as np
 
 # --- UI Configuration ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
@@ -13,7 +14,6 @@ st.markdown("Institutional Dual-Timeframe, Volatility, & Derivatives Decision En
 try:
     CG_API_KEY = st.secrets["CG_API_KEY"]
 except Exception:
-    st.warning("⚠️ CoinGecko API key not configured in secrets. Falling back to public rate limits.")
     CG_API_KEY = ""
 
 headers = {"x-cg-demo-api-key": CG_API_KEY}
@@ -37,6 +37,23 @@ ticker_map = {
     'aave': 'AAVE', 'compound-governance-token': 'COMP',
     'ripple': 'XRP', 'stellar': 'XLM'
 }
+
+# --- Webhook Alert Function ---
+def send_discord_alert(webhook_url, message):
+    if webhook_url:
+        try:
+            payload = {"content": message}
+            requests.post(webhook_url, json=payload, timeout=5)
+        except Exception:
+            pass
+
+# --- Sidebar: Automation Settings ---
+with st.sidebar:
+    st.header("🔔 Automation & Webhooks")
+    discord_webhook = st.text_input("Discord Webhook URL", type="password")
+    enable_alerts = st.checkbox("Enable Sniper Alerts")
+    st.markdown("---")
+    st.info("If enabled, the scanner will silently ping your Discord server the moment a Grade-A Sniper Entry triggers.")
 
 # --- Data Fetching Helpers ---
 @st.cache_data(ttl=43200, show_spinner=False)
@@ -92,13 +109,27 @@ def fetch_single_spot_price(coin_id):
         pass
     return 0.0
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_backtest_data(coin_id):
+    try:
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart?vs_currency=usd&days=90"
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            timestamps = [pd.to_datetime(item[0], unit='ms') for item in data['prices']]
+            prices = [item[1] for item in data['prices']]
+            return pd.DataFrame({'timestamp': timestamps, 'price': prices}).set_index('timestamp')
+    except Exception:
+        pass
+    return None
+
 # --- State Management ---
 if 'positions' not in st.session_state:
     st.session_state.positions = []
 if 'scan_data' not in st.session_state:
     st.session_state.scan_data = []
 
-tab1, tab2 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker"])
+tab1, tab2, tab3 = st.tabs(["📊 Radar Scanner", "🛡️ Sentinel Tracker", "🧪 Backtest Lab"])
 
 # ==========================================
 # TAB 1: RADAR SCANNER
@@ -179,7 +210,7 @@ with tab1:
                         
                         final_score = max(0, min(100, score))
                         
-                        # --- Veto Hierarchy ---
+                        # --- Veto Hierarchy & Webhook Triggers ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
                         elif funding_rate >= 0.00045:
@@ -193,6 +224,11 @@ with tab1:
                                 verdict = "🟢 SNIPER ENTRY (High-Conviction Squeeze)"
                             else:
                                 verdict = "🟢 SNIPER ENTRY (Divergence Confirmed)"
+                            
+                            # DISCORD WEBHOOK FIRE
+                            if enable_alerts and discord_webhook:
+                                send_discord_alert(discord_webhook, f"🚨 **{verdict}** 🚨\n**Asset:** {coin_name}\n**Price:** ${closed_p:,.4f}\n**Z-Score:** {closed_z:.2f}\n**Open Interest:** ${oi:,.0f}")
+
                         elif final_score >= 70 and closed_z <= -1.0:
                             verdict = "🟢 GRADE-A BUY (Confirmed Z-Dip)"
                         elif closed_z > -1.0:
@@ -270,7 +306,7 @@ with tab1:
     # --- Interactive Chart Inspection ---
     st.markdown("---")
     st.subheader("🔍 Deep Dive Asset Visualizer")
-    selected_coin_name = st.selectbox("Select Asset to Inspect Bands & Momentum", list(watchlist.values()))
+    selected_coin_name = st.selectbox("Select Asset to Inspect Bands & Momentum", list(watchlist.values()), key="vis_asset")
     
     if st.button("Generate Inspection Chart"):
         selected_id = [k for k, v in watchlist.items() if v == selected_coin_name][0]
@@ -297,23 +333,32 @@ with tab1:
             st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# TAB 2: SENTINEL TRACKER
+# TAB 2: SENTINEL TRACKER & HEAT MANAGER
 # ==========================================
 with tab2:
-    st.subheader("Dynamic Trailing Stop, Asymmetric TP Brackets, & Risk Manager")
+    st.subheader("Risk Sentinel & Portfolio Heat Manager")
     
     with st.expander("➕ Log New Trade & Calculate Position Size", expanded=True):
         st.markdown("**1. Portfolio Risk Limits**")
         c1, c2 = st.columns(2)
         with c1:
-            port_size = st.number_input("Total Portfolio Size ($)", min_value=50.0, value=5000.0, step=250.0)
+            port_size = st.number_input("Total Portfolio Size ($)", min_value=50.0, value=5000.0, step=250.0, key="port_size")
         with c2:
             max_risk = st.number_input("Risk Limit per Trade (%)", min_value=0.1, max_value=10.0, value=2.0, step=0.1)
+        
+        # PORTFOLIO HEAT CALCULATION
+        total_allocated = sum([pos.get("Size", 0) for pos in st.session_state.positions])
+        heat_pct = (total_allocated / port_size) * 100 if port_size > 0 else 0
+        
+        st.markdown(f"**Portfolio Heat: {heat_pct:.1f}%** Allocated (\\${total_allocated:,.2f} / \\${port_size:,.2f})")
+        st.progress(min(heat_pct / 100.0, 1.0))
+        if heat_pct >= 100:
+            st.error("⚠️ **OVERLEVERAGED:** Active positions exceed total portfolio balance. Close trades before adding new ones.")
             
         st.markdown("**2. Trade Configuration**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            trade_asset = st.selectbox("Select Asset to Trade", list(watchlist.values()))
+            trade_asset = st.selectbox("Select Asset to Trade", list(watchlist.values()), key="trade_asset")
             selected_coin_id = [k for k, v in watchlist.items() if v == trade_asset][0]
             live_price_estimate = fetch_single_spot_price(selected_coin_id)
         with col2:
@@ -326,7 +371,6 @@ with tab2:
         stop_fraction = trade_stop_pct / 100.0
         suggested_position = risk_dollar_budget / stop_fraction
         
-        # Take-Profit Target Calculations (1.5R and 3.0R)
         risk_per_coin = trade_entry * stop_fraction
         target_1 = trade_entry + (1.5 * risk_per_coin)
         target_2 = trade_entry + (3.0 * risk_per_coin)
@@ -338,16 +382,21 @@ with tab2:
         )
             
         if st.button("Commit Trade to Sentinel"):
-            st.session_state.positions.append({
-                "Asset": trade_asset,
-                "Entry": trade_entry,
-                "High Water Mark": trade_entry,
-                "Stop Pct": stop_fraction,
-                "Size": suggested_position,
-                "TP1": target_1,
-                "TP2": target_2
-            })
-            st.success(f"Position active: {trade_asset} logged at \\${trade_entry:,.4f}")
+            if heat_pct + ((suggested_position/port_size)*100) > 100:
+                st.error("Trade rejected: This position would push your portfolio heat over 100%.")
+            else:
+                st.session_state.positions.append({
+                    "Asset": trade_asset,
+                    "Entry": trade_entry,
+                    "High Water Mark": trade_entry,
+                    "Stop Pct": stop_fraction,
+                    "Size": suggested_position,
+                    "TP1": target_1,
+                    "TP2": target_2
+                })
+                st.success(f"Position active: {trade_asset} logged at \\${trade_entry:,.4f}")
+                time.sleep(1)
+                st.rerun()
 
     st.subheader("Active Positions")
     if st.button("🛡️ Refresh Sentinel & Check Brackets", type="primary"):
@@ -368,13 +417,12 @@ with tab2:
                         position_size = pos.get("Size", 0)
                         pnl_dollars = position_size * (pnl_pct / 100.0)
                         
-                        # Bracket State Engine
                         if curr_price <= stop_loss:
-                            action = "🔴 STOPPED OUT (Exit Position)"
+                            action = "🔴 STOPPED OUT"
                         elif curr_price >= pos.get("TP2", 0.0):
-                            action = "🎯 TP2 REACHED (+3.0R Full Take-Profit)"
+                            action = "🎯 TP2 REACHED"
                         elif curr_price >= pos.get("TP1", 0.0):
-                            action = "🎯 TP1 REACHED (+1.5R Scale Out 50%)"
+                            action = "🎯 TP1 REACHED"
                         else:
                             action = "🟢 HOLD"
                         
@@ -384,8 +432,6 @@ with tab2:
                             "Entry": f"${pos['Entry']:,.4f}",
                             "Current": f"${curr_price:,.4f}",
                             "Stop Loss": f"${stop_loss:,.4f}",
-                            "TP1 (1.5R)": f"${pos.get('TP1', 0.0):,.4f}",
-                            "TP2 (3.0R)": f"${pos.get('TP2', 0.0):,.4f}",
                             "P&L": f"{pnl_pct:+.2f}% (${pnl_dollars:+.2f})",
                             "Action": action
                         })
@@ -399,3 +445,57 @@ with tab2:
     if st.button("Clear All Positions"):
         st.session_state.positions = []
         st.rerun()
+
+# ==========================================
+# TAB 3: BACKTEST LAB
+# ==========================================
+with tab3:
+    st.subheader("🧪 Quantitative Backtest Engine (90-Day Hourly Data)")
+    st.markdown("Test the mathematical viability of buying the **-1.0 Z-Score Dip** across 2,000+ historical hourly candles before risking capital.")
+    
+    bt_asset_name = st.selectbox("Select Asset to Backtest", list(watchlist.values()), key="bt_asset")
+    
+    if st.button("Run Vectorized Backtest", type="primary"):
+        bt_coin_id = [k for k, v in watchlist.items() if v == bt_asset_name][0]
+        with st.spinner(f"Pulling 90 days of historical hourly data for {bt_asset_name}..."):
+            df_bt = fetch_backtest_data(bt_coin_id)
+            
+        if df_bt is not None and len(df_bt) > 50:
+            # Reconstruct the exact quantitative logic
+            df_bt['SMA_20'] = df_bt['price'].rolling(window=20).mean()
+            df_bt['STD_20'] = df_bt['price'].rolling(window=20).std()
+            df_bt['Z_Score'] = (df_bt['price'] - df_bt['SMA_20']) / df_bt['STD_20']
+            
+            # Forward return calculation (24 hours after a dip trigger)
+            df_bt['Forward_Return_24h'] = df_bt['price'].shift(-24) / df_bt['price'] - 1
+            
+            # Filter for exact Grade-A dip entry conditions
+            buy_signals = df_bt[df_bt['Z_Score'] <= -1.0].dropna(subset=['Forward_Return_24h'])
+            
+            total_signals = len(buy_signals)
+            if total_signals > 0:
+                winning_trades = buy_signals[buy_signals['Forward_Return_24h'] > 0]
+                win_rate = (len(winning_trades) / total_signals) * 100
+                avg_pnl = buy_signals['Forward_Return_24h'].mean() * 100
+                max_win = buy_signals['Forward_Return_24h'].max() * 100
+                max_loss = buy_signals['Forward_Return_24h'].min() * 100
+                
+                st.success(f"Backtest complete. Processed {len(df_bt):,} hourly candles.")
+                
+                col_b1, col_b2, col_b3 = st.columns(3)
+                col_b1.metric("Total Entry Signals Fired", total_signals)
+                col_b2.metric("24-Hour Forward Win Rate", f"{win_rate:.1f}%")
+                col_b3.metric("Average Profit per Trade", f"{avg_pnl:+.2f}%")
+                
+                st.markdown(f"**Best Performing Trade:** +{max_win:.2f}% | **Worst Performing Trade:** {max_loss:.2f}%")
+                
+                # Visualizing equity curve or signal scatter
+                fig_bt = go.Figure()
+                fig_bt.add_trace(go.Scatter(x=df_bt.index, y=df_bt['price'], mode='lines', name='Price', line=dict(color='#333333')))
+                fig_bt.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['price'], mode='markers', name='Dip Buy Triggers', marker=dict(color='#00FFA3', size=8, symbol='triangle-up')))
+                fig_bt.update_layout(title="Historical Trade Executions", template="plotly_dark", height=400)
+                st.plotly_chart(fig_bt, use_container_width=True)
+            else:
+                st.warning("No signals triggered in the last 90 days for this asset under current strict conditions.")
+        else:
+            st.error("Failed to retrieve sufficient historical data. API may be rate limited.")
