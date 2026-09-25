@@ -536,14 +536,31 @@ with tab4:
     st.subheader("🐋 Smart Money / Whale Surveillance")
     st.markdown("Track live perpetual futures exposure, leverage, and PnL for top Hyperliquid addresses.")
     
+    # Pre-loaded leaderboard whale addresses
+    known_whales = {
+        "Select a Curated Target...": None,
+        "Alpha Whale (Leaderboard Rank 1)": "0x85ecf584f25db6f146718b86d493e33c5af72052",
+        "Apex Predator (High Win-Rate)": "0xd820894cbda3406368d4a974b77f804fc9c71671",
+        "Deep Pocket (Max Open Interest)": "0x1f562bf57a06f3dc8693c66f50b86a87799ce77e",
+        "Custom Wallet Address...": "custom"
+    }
+    
     col_w1, col_w2 = st.columns([3, 1])
     with col_w1:
-        target_wallet = st.text_input("Enter Hyperliquid Wallet Address (0x...)", value="", placeholder="0x...")
+        target_selection = st.selectbox("Select Top Target or Enter Custom", list(known_whales.keys()))
+        if known_whales.get(target_selection) == "custom":
+            target_wallet = st.text_input("Enter Hyperliquid Wallet Address (0x...)", value="", placeholder="0x...")
+        else:
+            target_wallet = known_whales.get(target_selection)
+            
     with col_w2:
+        st.markdown("<br>", unsafe_allow_html=True) 
         scan_whale = st.button("📡 Scan Wallet", type="primary", use_container_width=True)
         
-    if scan_whale and target_wallet:
-        if not target_wallet.startswith("0x") or len(target_wallet) != 42:
+    if scan_whale:
+        if not target_wallet:
+            st.warning("Please select a target or enter a custom wallet address.")
+        elif not target_wallet.startswith("0x") or len(target_wallet) != 42:
             st.error("Invalid wallet address format. Must be an EVM-compatible 0x address.")
         else:
             with st.spinner(f"Intercepting clearinghouse state for {target_wallet[:6]}...{target_wallet[-4:]}"):
@@ -592,6 +609,6 @@ with tab4:
                     df_pos = pd.DataFrame(pos_list)
                     st.dataframe(df_pos, use_container_width=True, hide_index=True)
                 else:
-                    st.info("No active perpetual positions found for this wallet.")
+                    st.info("No active perpetual positions found for this wallet. They are currently flat.")
             else:
                 st.error("Could not retrieve wallet data. Ensure the address is correct and active on Hyperliquid.")
