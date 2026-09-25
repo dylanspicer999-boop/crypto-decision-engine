@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import time
 import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime
 
 # --- UI Configuration ---
@@ -280,7 +281,6 @@ with tab1:
                             else:
                                 verdict = "🟢 SNIPER ENTRY (High-Volume Absorption)"
                             
-                            # Log Event & Send Alert
                             timestamp = datetime.now().strftime("%H:%M")
                             log_str = f"[{timestamp}] {coin_name}: {verdict}"
                             if log_str not in st.session_state.event_log:
@@ -579,41 +579,80 @@ with tab4:
             
             est_leverage = total_ntl / account_val if account_val > 0 else 0
             
-            st.markdown("### 📊 House Liquidity Overview")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Vault Capital", f"${account_val:,.2f}")
-            c2.metric("Total Market Exposure", f"${total_ntl:,.2f}")
-            c3.metric("Systemic Leverage", f"{est_leverage:.2f}x")
-            
             positions = state_data.get("assetPositions", [])
+            
+            net_bias = 0.0
+            unrealized_pnl = 0.0
+            
             if positions:
-                st.markdown("### 🟢 The House's Active Bets (Fading Retail)")
                 pos_list = []
+                chart_data = []
                 for p in positions:
                     pos = p["position"]
                     coin = pos["coin"]
                     size = float(pos["szi"])
                     entry = float(pos["entryPx"])
                     pos_val = float(pos["positionValue"])
+                    pnl = float(pos["unrealizedPnl"])
+                    
+                    unrealized_pnl += pnl
                     
                     if size < 0:
                         house_bias = "🔴 SHORT (Retail is Long)"
+                        net_bias -= pos_val
+                        chart_data.append({"Asset": coin, "Exposure": -pos_val, "Direction": "Short"})
                     else:
                         house_bias = "🟢 LONG (Retail is Short)"
+                        net_bias += pos_val
+                        chart_data.append({"Asset": coin, "Exposure": pos_val, "Direction": "Long"})
                     
                     pos_list.append({
                         "Asset": coin,
                         "House Bias": house_bias,
                         "Exposure Value": f"${pos_val:,.2f}",
-                        "Entry Price": f"${entry:,.4f}"
+                        "Entry Price": f"${entry:,.4f}",
+                        "Unrealized PnL": f"${pnl:,.2f}",
+                        "_raw_exposure": pos_val
                     })
                     
                 df_pos = pd.DataFrame(pos_list)
-                df_pos['Raw Exposure'] = df_pos['Exposure Value'].replace('[\$,]', '', regex=True).astype(float)
-                df_pos = df_pos.sort_values(by="Raw Exposure", ascending=False).drop(columns=['Raw Exposure'])
+                df_pos = df_pos.sort_values(by="_raw_exposure", ascending=False).drop(columns=['_raw_exposure'])
                 
+                # --- Advanced Metrics Render ---
+                st.markdown("### 📊 House Liquidity Overview")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total Vault Capital", f"${account_val:,.2f}")
+                c2.metric("Total Market Exposure", f"${total_ntl:,.2f}")
+                c3.metric("Net Directional Bias", f"${net_bias:,.2f}", delta="Net Long" if net_bias > 0 else "Net Short", delta_color="normal" if net_bias > 0 else "inverse")
+                c4.metric("Live Unrealized PnL", f"${unrealized_pnl:,.2f}", delta="Profitable" if unrealized_pnl > 0 else "Underwater")
+                
+                st.markdown("---")
+                
+                # --- Exposure Heat Visualization ---
+                st.subheader("🔥 House Exposure Heatmap")
+                df_chart = pd.DataFrame(chart_data)
+                df_chart = df_chart.reindex(df_chart['Exposure'].abs().sort_values(ascending=True).index)
+                
+                fig = px.bar(
+                    df_chart, 
+                    x='Exposure', 
+                    y='Asset', 
+                    orientation='h',
+                    color='Direction',
+                    color_discrete_map={"Short": "#FF4B4B", "Long": "#00FFA3"},
+                    title="Net Liquidity Traps (Shorts = Left, Longs = Right)"
+                )
+                fig.update_layout(template="plotly_dark", height=400, showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                st.markdown("### 🟢 The House's Active Bets (Fading Retail)")
                 st.dataframe(df_pos, use_container_width=True, hide_index=True)
             else:
+                st.markdown("### 📊 House Liquidity Overview")
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Vault Capital", f"${account_val:,.2f}")
+                c2.metric("Total Market Exposure", f"${total_ntl:,.2f}")
+                c3.metric("Systemic Leverage", f"{est_leverage:.2f}x")
                 st.info("The House is currently flat.")
         else:
             st.error("Failed to connect to the Hyperliquid blockchain.")
