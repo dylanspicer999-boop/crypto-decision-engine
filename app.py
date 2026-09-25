@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import time
 import plotly.graph_objects as go
-import numpy as np
+from datetime import datetime
 
 # --- UI Configuration ---
 st.set_page_config(page_title="Apex Crypto Terminal", page_icon="🏛️", layout="wide")
@@ -47,15 +47,41 @@ def send_discord_alert(webhook_url, message):
         except Exception:
             pass
 
+# --- State Management ---
+if 'positions' not in st.session_state:
+    st.session_state.positions = []
+if 'scan_data' not in st.session_state:
+    st.session_state.scan_data = []
+if 'event_log' not in st.session_state:
+    st.session_state.event_log = []
+
 # --- Sidebar: Automation Settings ---
 with st.sidebar:
     st.header("🔔 Automation & Alerts")
     discord_webhook = st.text_input("Discord Webhook URL", type="password")
     enable_alerts = st.checkbox("Enable Sniper Alerts")
+    
+    st.markdown("---")
+    st.header("🤖 Auto-Pilot Daemon")
+    auto_pilot = st.toggle("Enable Background Auto-Scan")
+    poll_interval = st.selectbox("Scan Interval", [5, 15, 30, 60], format_func=lambda x: f"Every {x} Minutes")
+    
+    if auto_pilot:
+        st.success(f"🚀 Auto-Pilot Active: Scanning every {poll_interval}m.")
+    
     st.markdown("---")
     st.markdown("### ⚙️ Alpha Engine Parameters")
     min_z_score = st.slider("Strict Dip Threshold (Z-Score)", min_value=-3.0, max_value=-0.5, value=-1.2, step=0.1)
     vol_climax_mult = st.slider("Min Volume Absorption Multiple", min_value=1.0, max_value=3.0, value=1.5, step=0.1)
+
+    st.markdown("---")
+    if st.session_state.event_log:
+        st.markdown("### 📜 Sniper Event Log")
+        for event in reversed(st.session_state.event_log[-15:]):
+            st.caption(event)
+        if st.button("Clear Log"):
+            st.session_state.event_log = []
+            st.rerun()
 
 # --- Data Fetching Helpers ---
 @st.cache_data(ttl=43200, show_spinner=False)
@@ -151,12 +177,6 @@ def fetch_backtest_data(coin_id):
         pass
     return None
 
-# --- State Management ---
-if 'positions' not in st.session_state:
-    st.session_state.positions = []
-if 'scan_data' not in st.session_state:
-    st.session_state.scan_data = []
-
 tab1, tab2, tab3, tab4 = st.tabs(["🎯 Decision Matrix", "🛡️ Sentinel Tracker", "🧪 Quantitative Optimizer", "🏛️ The House"])
 
 # ==========================================
@@ -167,7 +187,7 @@ with tab1:
     with col_scan:
         scan_clicked = st.button("🔄 Execute Quantitative Evaluation", type="primary", use_container_width=True)
 
-    if scan_clicked:
+    if scan_clicked or auto_pilot:
         progress_bar = st.progress(0)
         status_text = st.empty()
         fresh_results = []
@@ -260,18 +280,28 @@ with tab1:
                             else:
                                 verdict = "🟢 SNIPER ENTRY (High-Volume Absorption)"
                             
-                            if enable_alerts and discord_webhook:
-                                send_discord_alert(
-                                    discord_webhook,
-                                    f"🎯 **HIGH-PROBABILITY QUANT SIGNAL** 🎯\n"
-                                    f"**Asset:** {coin_name}\n"
-                                    f"**Price:** ${closed_p:,.4f}\n"
-                                    f"**Z-Score:** {closed_z:.2f}\n"
-                                    f"**Relative vs BTC:** {rs_vs_btc*100:+.2f}%\n"
-                                    f"**Verdict:** {verdict}"
-                                )
+                            # Log Event & Send Alert
+                            timestamp = datetime.now().strftime("%H:%M")
+                            log_str = f"[{timestamp}] {coin_name}: {verdict}"
+                            if log_str not in st.session_state.event_log:
+                                st.session_state.event_log.append(log_str)
+                                
+                                if enable_alerts and discord_webhook:
+                                    send_discord_alert(
+                                        discord_webhook,
+                                        f"🎯 **HIGH-PROBABILITY QUANT SIGNAL** 🎯\n"
+                                        f"**Asset:** {coin_name}\n"
+                                        f"**Price:** ${closed_p:,.4f}\n"
+                                        f"**Z-Score:** {closed_z:.2f}\n"
+                                        f"**Relative vs BTC:** {rs_vs_btc*100:+.2f}%\n"
+                                        f"**Verdict:** {verdict}"
+                                    )
                         elif final_score >= 65 and closed_z <= -1.0:
                             verdict = "🟡 WATCHLIST (Absorption In Progress)"
+                            timestamp = datetime.now().strftime("%H:%M")
+                            log_str = f"[{timestamp}] {coin_name}: {verdict}"
+                            if log_str not in st.session_state.event_log:
+                                st.session_state.event_log.append(log_str)
                         else:
                             verdict = "🔴 PASS (Insufficient Edge)"
                         
@@ -537,7 +567,6 @@ with tab4:
     st.markdown("Stop tracking random individuals. The **HLP Vault** is Hyperliquid's native automated market maker. It acts as 'The House' by taking the exact opposite side of the retail herd. **If The House is heavily short, the retail crowd is dangerously long.**")
     
     if st.button("📡 Scan The House Exposure", type="primary", use_container_width=True):
-        # 0xdfc24b077bc1425ad1dea75bcb6f8158e10df303 is the official Hyperliquid HLP Vault
         hlp_wallet = "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303"
         
         with st.spinner("Intercepting Algorithmic Vault State..."):
@@ -567,7 +596,6 @@ with tab4:
                     entry = float(pos["entryPx"])
                     pos_val = float(pos["positionValue"])
                     
-                    # Translating the House bias
                     if size < 0:
                         house_bias = "🔴 SHORT (Retail is Long)"
                     else:
@@ -581,8 +609,6 @@ with tab4:
                     })
                     
                 df_pos = pd.DataFrame(pos_list)
-                
-                # Sort by highest dollar exposure automatically
                 df_pos['Raw Exposure'] = df_pos['Exposure Value'].replace('[\$,]', '', regex=True).astype(float)
                 df_pos = df_pos.sort_values(by="Raw Exposure", ascending=False).drop(columns=['Raw Exposure'])
                 
@@ -591,3 +617,8 @@ with tab4:
                 st.info("The House is currently flat.")
         else:
             st.error("Failed to connect to the Hyperliquid blockchain.")
+
+# --- Auto-Pilot Daemon Execution Loop ---
+if auto_pilot:
+    time.sleep(poll_interval * 60)
+    st.rerun()
