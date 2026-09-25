@@ -100,6 +100,19 @@ def fetch_hyperliquid_derivatives():
         pass
     return derivatives
 
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_clearinghouse_state(wallet_address):
+    try:
+        url = "https://api.hyperliquid.xyz/info"
+        headers_hl = {"Content-Type": "application/json"}
+        payload = {"type": "clearinghouseState", "user": wallet_address}
+        res = requests.post(url, headers=headers_hl, json=payload, timeout=10)
+        if res.status_code == 200:
+            return res.json()
+    except Exception:
+        pass
+    return None
+
 @st.cache_data(ttl=20, show_spinner=False)
 def fetch_single_spot_price(coin_id):
     try:
@@ -144,7 +157,7 @@ if 'positions' not in st.session_state:
 if 'scan_data' not in st.session_state:
     st.session_state.scan_data = []
 
-tab1, tab2, tab3 = st.tabs(["🎯 Decision Matrix", "🛡️ Sentinel Tracker", "🧪 Quantitative Optimizer"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 Decision Matrix", "🛡️ Sentinel Tracker", "🧪 Quantitative Optimizer", "🐋 Smart Money Tracker"])
 
 # ==========================================
 # TAB 1: DECISION MATRIX
@@ -183,29 +196,24 @@ with tab1:
                     df_h = pd.DataFrame({'price': prices_h, 'volume': volumes_h})
                     
                     if len(df_h) >= 50:
-                        # Statistical Volatility Calculations
                         df_h['SMA_20'] = df_h['price'].rolling(window=20).mean()
                         df_h['STD_20'] = df_h['price'].rolling(window=20).std()
                         df_h['Z_Score'] = (df_h['price'] - df_h['SMA_20']) / df_h['STD_20']
                         
-                        # Relative Strength vs BTC (Rolling 24h)
                         asset_24h_return = (df_h['price'].iloc[-1] - df_h['price'].iloc[-25]) / df_h['price'].iloc[-25] if len(df_h) >= 25 else 0.0
                         rs_vs_btc = asset_24h_return - btc_24h_return
                         
-                        # Volume Dynamics
                         df_h['Vol_SMA_20'] = df_h['volume'].rolling(window=20).mean()
                         closed_vol = df_h['volume'].iloc[-2]
                         closed_vol_sma = df_h['Vol_SMA_20'].iloc[-2]
                         volume_absorbed = closed_vol >= (closed_vol_sma * vol_climax_mult)
                         
-                        # RSI & Divergence
                         delta = df_h['price'].diff()
                         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
                         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
                         rs = gain / loss
                         df_h['RSI_14'] = 100 - (100 / (1 + rs))
                         
-                        # MACD Momentum Vector
                         ema_12 = df_h['price'].ewm(span=12, adjust=False).mean()
                         ema_26 = df_h['price'].ewm(span=26, adjust=False).mean()
                         df_h['MACD'] = ema_12 - ema_26
@@ -219,26 +227,23 @@ with tab1:
                         prev_hist = df_h['MACD_Hist'].iloc[-3]
                         momentum_decelerating = curr_hist > prev_hist
                         
-                        # Algorithmic Bullish Divergence Search
                         past_30 = df_h.iloc[-32:-2]
                         lowest_idx = past_30['price'].idxmin()
                         past_low_p = past_30.loc[lowest_idx, 'price']
                         past_low_rsi = past_30.loc[lowest_idx, 'RSI_14']
                         is_divergence = (closed_p < past_low_p) and (closed_rsi > past_low_rsi) and (closed_z < 0)
                         
-                        # Quantitative Score Calculation
                         score = 0
                         if macro_trend_bullish: score += 20
                         if closed_z <= min_z_score: score += 25
                         if is_divergence: score += 25
                         if volume_absorbed: score += 15
                         if momentum_decelerating: score += 10
-                        if funding_rate <= 0.0: score += 10 # Short-trap fuel
-                        if rs_vs_btc > 0.01: score += 10 # Outperforming BTC
+                        if funding_rate <= 0.0: score += 10
+                        if rs_vs_btc > 0.01: score += 10
                         
                         final_score = min(100, score)
                         
-                        # --- Master Institutional Decision Hierarchy ---
                         if not macro_trend_bullish:
                             verdict = "🔴 PASS (Macro Downtrend Veto)"
                         elif funding_rate >= 0.00045:
@@ -255,7 +260,6 @@ with tab1:
                             else:
                                 verdict = "🟢 SNIPER ENTRY (High-Volume Absorption)"
                             
-                            # Fire Alert
                             if enable_alerts and discord_webhook:
                                 send_discord_alert(
                                     discord_webhook,
@@ -300,7 +304,6 @@ with tab1:
         progress_bar.empty()
         st.session_state.scan_data = fresh_results
 
-    # --- Sorter & Signal Inspection ---
     if st.session_state.scan_data:
         st.markdown("### 🔍 Execution Filters")
         f1, f2 = st.columns(2)
@@ -332,7 +335,6 @@ with tab1:
         cols = ["Asset", "Price", "Z-Score", "Vol Absorption", "Alpha vs BTC", "Funding Rate", "Open Interest", "Divergence", "Score", "Verdict"]
         st.dataframe(df_display[cols], use_container_width=True, hide_index=True)
 
-    # --- Structural Visualizer ---
     st.markdown("---")
     st.subheader("📊 Price Distribution & Volatility Channel")
     selected_coin_name = st.selectbox("Select Asset to Verify Volatility Envelopes", list(watchlist.values()), key="vis_asset")
@@ -526,3 +528,70 @@ with tab3:
                 st.warning(f"No triggers observed for {bt_asset_name} under a {bt_z_thresh} Z-Score requirement.")
         else:
             st.error("Historical dataset unavailable. Check connection limits.")
+
+# ==========================================
+# TAB 4: SMART MONEY TRACKER (WHALES)
+# ==========================================
+with tab4:
+    st.subheader("🐋 Smart Money / Whale Surveillance")
+    st.markdown("Track live perpetual futures exposure, leverage, and PnL for top Hyperliquid addresses.")
+    
+    col_w1, col_w2 = st.columns([3, 1])
+    with col_w1:
+        target_wallet = st.text_input("Enter Hyperliquid Wallet Address (0x...)", value="", placeholder="0x...")
+    with col_w2:
+        scan_whale = st.button("📡 Scan Wallet", type="primary", use_container_width=True)
+        
+    if scan_whale and target_wallet:
+        if not target_wallet.startswith("0x") or len(target_wallet) != 42:
+            st.error("Invalid wallet address format. Must be an EVM-compatible 0x address.")
+        else:
+            with st.spinner(f"Intercepting clearinghouse state for {target_wallet[:6]}...{target_wallet[-4:]}"):
+                state_data = fetch_clearinghouse_state(target_wallet)
+                
+            if state_data and "marginSummary" in state_data:
+                margin = state_data["marginSummary"]
+                account_val = float(margin.get("accountValue", 0))
+                total_ntl = float(margin.get("totalNtlPos", 0))
+                margin_used = float(margin.get("totalMarginUsed", 0))
+                
+                est_leverage = total_ntl / account_val if account_val > 0 else 0
+                
+                st.markdown("### 📊 Account Overview")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Account Equity", f"${account_val:,.2f}")
+                c2.metric("Total Open Interest", f"${total_ntl:,.2f}")
+                c3.metric("Margin Used", f"${margin_used:,.2f}")
+                c4.metric("Est. Account Leverage", f"{est_leverage:.2f}x")
+                
+                positions = state_data.get("assetPositions", [])
+                if positions:
+                    st.markdown("### 🟢 Active Perpetual Positions")
+                    pos_list = []
+                    for p in positions:
+                        pos = p["position"]
+                        coin = pos["coin"]
+                        size = float(pos["szi"])
+                        entry = float(pos["entryPx"])
+                        pos_val = float(pos["positionValue"])
+                        pnl = float(pos["unrealizedPnl"])
+                        lev = pos["leverage"]["value"]
+                        
+                        side = "LONG" if size > 0 else "SHORT"
+                        
+                        pos_list.append({
+                            "Asset": coin,
+                            "Side": side,
+                            "Size": f"{abs(size):,.4f}",
+                            "Entry Price": f"${entry:,.4f}",
+                            "Position Value": f"${pos_val:,.2f}",
+                            "Leverage": f"{lev}x",
+                            "Unrealized PnL": f"${pnl:,.2f}"
+                        })
+                        
+                    df_pos = pd.DataFrame(pos_list)
+                    st.dataframe(df_pos, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No active perpetual positions found for this wallet.")
+            else:
+                st.error("Could not retrieve wallet data. Ensure the address is correct and active on Hyperliquid.")
