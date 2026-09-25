@@ -157,7 +157,7 @@ if 'positions' not in st.session_state:
 if 'scan_data' not in st.session_state:
     st.session_state.scan_data = []
 
-tab1, tab2, tab3, tab4 = st.tabs(["🎯 Decision Matrix", "🛡️ Sentinel Tracker", "🧪 Quantitative Optimizer", "🐋 Smart Money Tracker"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 Decision Matrix", "🛡️ Sentinel Tracker", "🧪 Quantitative Optimizer", "🏛️ The House"])
 
 # ==========================================
 # TAB 1: DECISION MATRIX
@@ -530,85 +530,64 @@ with tab3:
             st.error("Historical dataset unavailable. Check connection limits.")
 
 # ==========================================
-# TAB 4: SMART MONEY TRACKER (WHALES)
+# TAB 4: THE HOUSE COUNTERPARTY (HLP)
 # ==========================================
 with tab4:
-    st.subheader("🐋 Smart Money / Whale Surveillance")
-    st.markdown("Track live perpetual futures exposure, leverage, and PnL for top Hyperliquid addresses.")
+    st.subheader("🏛️ Algorithmic House Counterparty Tracker")
+    st.markdown("Stop tracking random individuals. The **HLP Vault** is Hyperliquid's native automated market maker. It acts as 'The House' by taking the exact opposite side of the retail herd. **If The House is heavily short, the retail crowd is dangerously long.**")
     
-    # Pre-loaded leaderboard whale addresses
-    known_whales = {
-        "Select a Curated Target...": None,
-        "Alpha Whale (Leaderboard Rank 1)": "0x85ecf584f25db6f146718b86d493e33c5af72052",
-        "Apex Predator (High Win-Rate)": "0xd820894cbda3406368d4a974b77f804fc9c71671",
-        "Deep Pocket (Max Open Interest)": "0x1f562bf57a06f3dc8693c66f50b86a87799ce77e",
-        "Custom Wallet Address...": "custom"
-    }
-    
-    col_w1, col_w2 = st.columns([3, 1])
-    with col_w1:
-        target_selection = st.selectbox("Select Top Target or Enter Custom", list(known_whales.keys()))
-        if known_whales.get(target_selection) == "custom":
-            target_wallet = st.text_input("Enter Hyperliquid Wallet Address (0x...)", value="", placeholder="0x...")
-        else:
-            target_wallet = known_whales.get(target_selection)
-            
-    with col_w2:
-        st.markdown("<br>", unsafe_allow_html=True) 
-        scan_whale = st.button("📡 Scan Wallet", type="primary", use_container_width=True)
+    if st.button("📡 Scan The House Exposure", type="primary", use_container_width=True):
+        # 0xdfc24b077bc1425ad1dea75bcb6f8158e10df303 is the official Hyperliquid HLP Vault
+        hlp_wallet = "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303"
         
-    if scan_whale:
-        if not target_wallet:
-            st.warning("Please select a target or enter a custom wallet address.")
-        elif not target_wallet.startswith("0x") or len(target_wallet) != 42:
-            st.error("Invalid wallet address format. Must be an EVM-compatible 0x address.")
-        else:
-            with st.spinner(f"Intercepting clearinghouse state for {target_wallet[:6]}...{target_wallet[-4:]}"):
-                state_data = fetch_clearinghouse_state(target_wallet)
+        with st.spinner("Intercepting Algorithmic Vault State..."):
+            state_data = fetch_clearinghouse_state(hlp_wallet)
+            
+        if state_data and "marginSummary" in state_data:
+            margin = state_data["marginSummary"]
+            account_val = float(margin.get("accountValue", 0))
+            total_ntl = float(margin.get("totalNtlPos", 0))
+            
+            est_leverage = total_ntl / account_val if account_val > 0 else 0
+            
+            st.markdown("### 📊 House Liquidity Overview")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Vault Capital", f"${account_val:,.2f}")
+            c2.metric("Total Market Exposure", f"${total_ntl:,.2f}")
+            c3.metric("Systemic Leverage", f"{est_leverage:.2f}x")
+            
+            positions = state_data.get("assetPositions", [])
+            if positions:
+                st.markdown("### 🟢 The House's Active Bets (Fading Retail)")
+                pos_list = []
+                for p in positions:
+                    pos = p["position"]
+                    coin = pos["coin"]
+                    size = float(pos["szi"])
+                    entry = float(pos["entryPx"])
+                    pos_val = float(pos["positionValue"])
+                    
+                    # Translating the House bias
+                    if size < 0:
+                        house_bias = "🔴 SHORT (Retail is Long)"
+                    else:
+                        house_bias = "🟢 LONG (Retail is Short)"
+                    
+                    pos_list.append({
+                        "Asset": coin,
+                        "House Bias": house_bias,
+                        "Exposure Value": f"${pos_val:,.2f}",
+                        "Entry Price": f"${entry:,.4f}"
+                    })
+                    
+                df_pos = pd.DataFrame(pos_list)
                 
-            if state_data and "marginSummary" in state_data:
-                margin = state_data["marginSummary"]
-                account_val = float(margin.get("accountValue", 0))
-                total_ntl = float(margin.get("totalNtlPos", 0))
-                margin_used = float(margin.get("totalMarginUsed", 0))
+                # Sort by highest dollar exposure automatically
+                df_pos['Raw Exposure'] = df_pos['Exposure Value'].replace('[\$,]', '', regex=True).astype(float)
+                df_pos = df_pos.sort_values(by="Raw Exposure", ascending=False).drop(columns=['Raw Exposure'])
                 
-                est_leverage = total_ntl / account_val if account_val > 0 else 0
-                
-                st.markdown("### 📊 Account Overview")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Account Equity", f"${account_val:,.2f}")
-                c2.metric("Total Open Interest", f"${total_ntl:,.2f}")
-                c3.metric("Margin Used", f"${margin_used:,.2f}")
-                c4.metric("Est. Account Leverage", f"{est_leverage:.2f}x")
-                
-                positions = state_data.get("assetPositions", [])
-                if positions:
-                    st.markdown("### 🟢 Active Perpetual Positions")
-                    pos_list = []
-                    for p in positions:
-                        pos = p["position"]
-                        coin = pos["coin"]
-                        size = float(pos["szi"])
-                        entry = float(pos["entryPx"])
-                        pos_val = float(pos["positionValue"])
-                        pnl = float(pos["unrealizedPnl"])
-                        lev = pos["leverage"]["value"]
-                        
-                        side = "LONG" if size > 0 else "SHORT"
-                        
-                        pos_list.append({
-                            "Asset": coin,
-                            "Side": side,
-                            "Size": f"{abs(size):,.4f}",
-                            "Entry Price": f"${entry:,.4f}",
-                            "Position Value": f"${pos_val:,.2f}",
-                            "Leverage": f"{lev}x",
-                            "Unrealized PnL": f"${pnl:,.2f}"
-                        })
-                        
-                    df_pos = pd.DataFrame(pos_list)
-                    st.dataframe(df_pos, use_container_width=True, hide_index=True)
-                else:
-                    st.info("No active perpetual positions found for this wallet. They are currently flat.")
+                st.dataframe(df_pos, use_container_width=True, hide_index=True)
             else:
-                st.error("Could not retrieve wallet data. Ensure the address is correct and active on Hyperliquid.")
+                st.info("The House is currently flat.")
+        else:
+            st.error("Failed to connect to the Hyperliquid blockchain.")
